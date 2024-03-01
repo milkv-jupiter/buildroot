@@ -277,6 +277,14 @@ config BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL
 	  virgl is the 3D acceleration backend for the virtio-gpu
 	  shipping with qemu.
 
+config BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PVR
+        bool "Gallium pvr driver"
+        depends on BR2_PACKAGE_IMG_GPU_POWERVR
+        select BR2_PACKAGE_MESA3D_GALLIUM_DRIVER
+        select BR2_PACKAGE_MESA3D_OPENGL_EGL
+        help
+          pvr is the 3D acceleration backend for Imagination PowerVR GPUs
+
 config BR2_PACKAGE_MESA3D_VDPAU
 	bool "Gallium VDPAU state tracker"
 	depends on BR2_PACKAGE_XORG7

@@ -1,0 +1,27 @@
+From fa39466071e3ddfc7b3f8e4062332778a76fcf5c Mon Sep 17 00:00:00 2001
+From: dengbo <bo.deng@spacemit.com>
+Date: Wed, 27 Dec 2023 20:45:49 +0800
+Subject: [PATCH] weston: set default compositor to gpu
+
+Workaround:
+spacemit drm has bug to assign multi planes to display.
+---
+ libweston/backend-drm/state-propose.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libweston/backend-drm/state-propose.c b/libweston/backend-drm/state-propose.c
+index 7b350aa..ecc6575 100644
+--- a/libweston/backend-drm/state-propose.c
++++ b/libweston/backend-drm/state-propose.c
+@@ -1097,7 +1097,7 @@ drm_assign_planes(struct weston_output *output_base, void *repaint_data)
+ 	struct drm_plane_state *plane_state;
+ 	struct weston_paint_node *pnode;
+ 	struct weston_plane *primary = &output_base->compositor->primary_plane;
+-	enum drm_output_propose_state_mode mode = DRM_OUTPUT_PROPOSE_STATE_PLANES_ONLY;
++	enum drm_output_propose_state_mode mode = DRM_OUTPUT_PROPOSE_STATE_RENDERER_ONLY;
+ 
+ 	drm_debug(b, "\t[repaint] preparing state for output %s (%lu)\n",
+ 		  output_base->name, (unsigned long) output_base->id);
+-- 
+2.34.1
+

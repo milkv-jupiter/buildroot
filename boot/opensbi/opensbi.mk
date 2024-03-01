@@ -6,7 +6,10 @@
 
 OPENSBI_VERSION = $(call qstrip,$(BR2_TARGET_OPENSBI_VERSION))
 
-ifeq ($(BR2_TARGET_OPENSBI_CUSTOM_TARBALL),y)
+ifeq ($(BR2_TARGET_OPENSBI_CUSTOM_LOCAL),y)
+OPENSBI_SITE = $(BR2_TARGET_OPENSBI_CUSTOM_LOCAL_DIR)
+OPENSBI_SITE_METHOD = local
+else ifeq ($(BR2_TARGET_OPENSBI_CUSTOM_TARBALL),y)
 # Handle custom OpenSBI tarballs as specified by the configuration
 OPENSBI_TARBALL = $(call qstrip,$(BR2_TARGET_OPENSBI_CUSTOM_TARBALL_LOCATION))
 OPENSBI_SITE = $(patsubst %/,%,$(dir $(OPENSBI_TARBALL)))
@@ -78,6 +81,8 @@ define OPENSBI_INSTALL_IMAGES_CMDS
 			$(BINARIES_DIR)/fw_$(f).bin
 		$(INSTALL) -m 0644 -D $(@D)/build/platform/$(OPENSBI_PLAT)/firmware/fw_$(f).elf \
 			$(BINARIES_DIR)/fw_$(f).elf
+		$(INSTALL) -m 0644 -D $(@D)/build/platform/$(OPENSBI_PLAT)/firmware/fw_$(f).itb \
+			$(BINARIES_DIR)/fw_$(f).itb
 	)
 endef
 endif

@@ -1,0 +1,29 @@
+From 4fabbe9144f13dd7e270d0d1e5ab4c3c32d00c27 Mon Sep 17 00:00:00 2001
+From: max <guoqun.ma@spacemit.com>
+Date: Mon, 22 Jan 2024 11:24:15 +0800
+Subject: [PATCH] fix: Having multiple values in <test> isn't supported and may
+ not work as expected
+
+---
+ 44-wqy-zenhei.conf | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/44-wqy-zenhei.conf b/44-wqy-zenhei.conf
+index 5744827..5b70987 100644
+--- a/44-wqy-zenhei.conf
++++ b/44-wqy-zenhei.conf
+@@ -6,7 +6,11 @@
+   <match target="font">
+         <test qual="any" name="family">
+                 <string>WenQuanYi Zen Hei</string>
++        </test> 
++        <test qual="any" name="family">
+                 <string>文泉驿正黑</string>
++        </test> 
++        <test qual="any" name="family">
+                 <string>文泉驛正黑</string>
+         </test> 
+         <edit name="globaladvance"><bool>false</bool></edit>
+-- 
+2.25.1
+

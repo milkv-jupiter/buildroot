@@ -1,0 +1,90 @@
+From 65af285e2b025d93fb44147d26dbf4c00dda2a23 Mon Sep 17 00:00:00 2001
+From: max <guoqun.ma@spacemit.com>
+Date: Wed, 24 Jan 2024 16:07:20 +0800
+Subject: [PATCH] support reboot to bootloader
+
+---
+ init/halt.c | 47 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/init/halt.c b/init/halt.c
+index fe3cb9e..9118e7a 100644
+--- a/init/halt.c
++++ b/init/halt.c
+@@ -93,6 +93,20 @@
+ 
+ #include "libbb.h"
+ #include "reboot.h"
++#include <stdlib.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <string.h>
++#include <errno.h>
++#include <sys/cdefs.h>
++#include <sys/reboot.h>
++#include <sys/types.h>
++#include <linux/reboot.h>
++#include <sys/syscall.h>
++
++#define LINUX_REBOOT_MAGIC1	0xfee1dead
++#define LINUX_REBOOT_MAGIC2	672274793
++#define LINUX_REBOOT_CMD_RESTART2	0xA1B2C3D4
+ 
+ #if ENABLE_FEATURE_WTMP
+ #include <sys/utsname.h>
+@@ -162,13 +176,14 @@ static int init_was_not_there(void)
+ #endif
+ 
+ int halt_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
+-int halt_main(int argc UNUSED_PARAM, char **argv)
++int halt_main(int argc , char **argv)
+ {
+ 	static const int magic[] = {
+ 		RB_HALT_SYSTEM,
+ 		RB_POWER_OFF,
+ 		RB_AUTOBOOT
+ 	};
++
+ 	static const smallint signals[] = { SIGUSR1, SIGUSR2, SIGTERM };
+ 
+ 	int delay = 0;
+@@ -187,6 +202,36 @@ int halt_main(int argc UNUSED_PARAM, char **argv)
+ 	for (which = 0; "hpr"[which] != applet_name[0]; which++)
+ 		continue;
+ 
++	if((argc == 1) ||(argc != 1 && !strcmp(argv[1],"bootloader"))) {
++		char buf[100];
++		int pid, ret;
++
++		sync();
++
++		/* Attempt to unmount the SD card first.
++		* No need to bother checking for errors.
++		*/
++		pid = fork();
++		if (pid == 0) {
++			/* ask vdc to unmount it */
++			/*execl("/system/bin/vdc", "/system/bin/vdc", "volume", "unmount",
++			getenv("EXTERNAL_STORAGE"), "force", NULL);*/
++		} else if (pid > 0) {
++			/* wait until vdc succeeds or fails */
++			waitpid(pid, &ret, 0);
++		}
++
++		if(argc == 1)
++			ret = reboot(magic[which]);
++		else
++			ret = syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
++				LINUX_REBOOT_CMD_RESTART2, argv[1]);
++		if (ret < 0) {
++			snprintf(buf, sizeof(buf), "reboot failed: %s\n", strerror(errno));
++		}
++
++	}
++
+ 	/* Parse and handle arguments */
+ 	/* We support -w even if !ENABLE_FEATURE_WTMP,
+ 	 * in order to not break scripts.
+-- 
+2.25.1
+

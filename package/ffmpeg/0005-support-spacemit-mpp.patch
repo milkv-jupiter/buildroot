@@ -1,0 +1,658 @@
+From ad231da546c0680c5895fc7a31d52a6e4af966da Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Tue, 26 Dec 2023 20:01:37 +0800
+Subject: [PATCH] support spacemit mpp
+
+---
+ configure               |   6 +-
+ libavcodec/Makefile     |   2 +
+ libavcodec/allcodecs.c  |   2 +
+ libavcodec/stcodecdec.c | 553 ++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 562 insertions(+), 1 deletion(-)
+ create mode 100755 libavcodec/stcodecdec.c
+
+diff --git a/configure b/configure
+index 01bb1dd..52561c1 100755
+--- a/configure
++++ b/configure
+@@ -345,6 +345,7 @@ External library support:
+   --enable-omx             enable OpenMAX IL code [no]
+   --enable-omx-rpi         enable OpenMAX IL code for Raspberry Pi [no]
+   --enable-rkmpp           enable Rockchip Media Process Platform code [no]
++  --enable-stcodec         enable Spacemit Media Process Platform code [no]
+   --disable-v4l2-m2m       disable V4L2 mem2mem code [autodetect]
+   --disable-vaapi          disable Video Acceleration API (mainly Unix/Intel) code [autodetect]
+   --disable-vdpau          disable Nvidia Video Decode and Presentation API for Unix code [autodetect]
+@@ -1730,6 +1731,7 @@ EXTERNAL_LIBRARY_GPL_LIST="
+     libxavs
+     libxavs2
+     libxvid
++    stcodec
+ "
+ 
+ EXTERNAL_LIBRARY_NONFREE_LIST="
+@@ -3092,6 +3094,7 @@ h264_vaapi_encoder_select="cbs_h264 vaapi_encode"
+ h264_v4l2m2m_decoder_deps="v4l2_m2m h264_v4l2_m2m"
+ h264_v4l2m2m_decoder_select="h264_mp4toannexb_bsf"
+ h264_v4l2m2m_encoder_deps="v4l2_m2m h264_v4l2_m2m"
++h264_stcodec_decoder_deps="stcodec"
+ hevc_amf_encoder_deps="amf"
+ hevc_cuvid_decoder_deps="cuvid"
+ hevc_cuvid_decoder_select="hevc_mp4toannexb_bsf"
+@@ -3109,6 +3112,7 @@ hevc_vaapi_encoder_select="cbs_h265 vaapi_encode"
+ hevc_v4l2m2m_decoder_deps="v4l2_m2m hevc_v4l2_m2m"
+ hevc_v4l2m2m_decoder_select="hevc_mp4toannexb_bsf"
+ hevc_v4l2m2m_encoder_deps="v4l2_m2m hevc_v4l2_m2m"
++hevc_stcodec_decoder_deps="stcodec"
+ mjpeg_cuvid_decoder_deps="cuvid"
+ mjpeg_qsv_decoder_select="qsvdec"
+ mjpeg_qsv_encoder_deps="libmfx"
+@@ -6547,7 +6551,7 @@ enabled rkmpp             && { require_pkg_config rkmpp rockchip_mpp  rockchip/r
+                                  die "ERROR: rkmpp requires --enable-libdrm"; }
+                              }
+ enabled vapoursynth       && require_pkg_config vapoursynth "vapoursynth-script >= 42" VSScript.h vsscript_init
+-
++enabled stcodec
+ 
+ if enabled gcrypt; then
+     GCRYPT_CONFIG="${cross_prefix}libgcrypt-config"
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index b3d284d..ff56ed6 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -385,6 +385,7 @@ OBJS-$(CONFIG_H264_VAAPI_ENCODER)      += vaapi_encode_h264.o h264_levels.o
+ OBJS-$(CONFIG_H264_VIDEOTOOLBOX_ENCODER) += videotoolboxenc.o
+ OBJS-$(CONFIG_H264_V4L2M2M_DECODER)    += v4l2_m2m_dec.o
+ OBJS-$(CONFIG_H264_V4L2M2M_ENCODER)    += v4l2_m2m_enc.o
++OBJS-$(CONFIG_H264_STCODEC_DECODER)    += stcodecdec.o
+ OBJS-$(CONFIG_HAP_DECODER)             += hapdec.o hap.o
+ OBJS-$(CONFIG_HAP_ENCODER)             += hapenc.o hap.o
+ OBJS-$(CONFIG_HCA_DECODER)             += hcadec.o
+@@ -405,6 +406,7 @@ OBJS-$(CONFIG_HEVC_RKMPP_DECODER)      += rkmppdec.o
+ OBJS-$(CONFIG_HEVC_VAAPI_ENCODER)      += vaapi_encode_h265.o h265_profile_level.o
+ OBJS-$(CONFIG_HEVC_V4L2M2M_DECODER)    += v4l2_m2m_dec.o
+ OBJS-$(CONFIG_HEVC_V4L2M2M_ENCODER)    += v4l2_m2m_enc.o
++OBJS-$(CONFIG_HEVC_STCODEC_DECODER)    += stcodecdec.o
+ OBJS-$(CONFIG_HNM4_VIDEO_DECODER)      += hnm4video.o
+ OBJS-$(CONFIG_HQ_HQA_DECODER)          += hq_hqa.o hq_hqadata.o hq_hqadsp.o \
+                                           canopus.o
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index 2e9a358..9981106 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -148,11 +148,13 @@ extern AVCodec ff_h264_mediacodec_decoder;
+ extern AVCodec ff_h264_mmal_decoder;
+ extern AVCodec ff_h264_qsv_decoder;
+ extern AVCodec ff_h264_rkmpp_decoder;
++extern AVCodec ff_h264_stcodec_decoder;
+ extern AVCodec ff_hap_encoder;
+ extern AVCodec ff_hap_decoder;
+ extern AVCodec ff_hevc_decoder;
+ extern AVCodec ff_hevc_qsv_decoder;
+ extern AVCodec ff_hevc_rkmpp_decoder;
++extern AVCodec ff_hevc_stcodec_decoder;
+ extern AVCodec ff_hevc_v4l2m2m_decoder;
+ extern AVCodec ff_hnm4_video_decoder;
+ extern AVCodec ff_hq_hqa_decoder;
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+new file mode 100755
+index 0000000..763e1b2
+--- /dev/null
++++ b/libavcodec/stcodecdec.c
+@@ -0,0 +1,553 @@
++/*
++ * Spacemit MPP Video Decoder
++ * Copyright 2022-2023 SPACEMIT. All rights reserved.
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <drm_fourcc.h>
++#include <pthread.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "avcodec.h"
++#include "internal.h"
++#include "decode.h"
++#include "h264_parse.h"
++#include "hevc_parse.h"
++#include "hwconfig.h"
++#include "libavutil/buffer.h"
++#include "libavutil/common.h"
++#include "libavutil/frame.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_drm.h"
++#include "libavutil/imgutils.h"
++#include "libavutil/log.h"
++#include "vdec.h"
++
++#define PACKET_SIZE (2 * 1024 * 1024)
++
++typedef struct {
++  MppVdecCtx* pVdecCtx;
++  MppVdecPara* pVdecPara;
++  MppPacket* pPacket;
++  MppFrame* pFrame;
++  enum AVPixelFormat ePixFmt;
++
++  char eos_reached;
++
++  AVBufferRef* frames_ref;
++  AVBufferRef* device_ref;
++} STCODECDecoder;
++
++typedef struct {
++  AVClass* av_class;
++  AVBufferRef* decoder_ref;
++} STCODECDecodeContext;
++
++typedef struct {
++  MppFrame* pFrame;
++  AVBufferRef* decoder_ref;
++} STCODECFrameContext;
++
++static MppCodingType stcodec_get_codingtype(AVCodecContext* avctx) {
++  switch (avctx->codec_id) {
++    case AV_CODEC_ID_H264:
++      return CODING_H264;
++    case AV_CODEC_ID_HEVC:
++      return CODING_H265;
++    case AV_CODEC_ID_VP8:
++      return CODING_VP8;
++    case AV_CODEC_ID_VP9:
++      return CODING_VP9;
++    case AV_CODEC_ID_MJPEG:
++      return CODING_MJPEG;
++    default:
++      return CODING_UNKNOWN;
++  }
++}
++
++static int get_stride(int width, int align) {
++  return (width + align - 1) & (~(align - 1));
++}
++
++static int stcodec_send_data_to_decoder(AVCodecContext* avctx, uint8_t* buffer,
++                                        int size, int64_t pts) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
++  int ret = 0;
++
++  if (!buffer && 0 == size) {
++    // a NULL packet, need to send EOS to decoder.
++    PACKET_SetEos(decoder->pPacket, 1);
++    PACKET_SetLength(decoder->pPacket, 0);
++  } else {
++    // debug
++    av_log(avctx, AV_LOG_DEBUG, "%x %x %x %x %x length = %d\n", *buffer,
++           *(buffer + 1), *(buffer + 2), *(buffer + 3), *(buffer + 4), size);
++
++    PACKET_SetDataPointer(decoder->pPacket, buffer);
++    PACKET_SetLength(decoder->pPacket, size);
++    PACKET_SetPts(decoder->pPacket, pts);
++    PACKET_SetEos(decoder->pPacket, 0);
++    av_log(avctx, AV_LOG_DEBUG, "input pts : %ld\n", pts);
++  }
++
++  // send packet to decoder, the packet will be copyed in decoder, so can
++  // release it here.
++  ret = VDEC_Decode(decoder->pVdecCtx, PACKET_GetBaseData(decoder->pPacket));
++  if (ret) {
++    if (ret == MPP_DATAQUEUE_FULL) {
++      // input unblock mode will go here.
++      av_log(avctx, AV_LOG_DEBUG, "Buffer full writing %d bytes to decoder\n",
++             size);
++      ret = AVERROR(EAGAIN);  // here something wrong, maybe return 0
++    } else {
++      ret = AVERROR_UNKNOWN;
++    }
++  } else {
++    av_log(avctx, AV_LOG_DEBUG, "Write %d bytes to decoder\n", size);
++  }
++
++  return ret;  // here something wrong, maybe return 0
++}
++
++static int stcodec_close_decoder(AVCodecContext* avctx) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  av_log(NULL, AV_LOG_DEBUG, "stcodec close decoder\n");
++  av_buffer_unref(&st_context->decoder_ref);
++  return 0;
++}
++
++static void stcodec_release_stcodec_decoder(void* opaque, uint8_t* data) {
++  STCODECDecoder* decoder = (STCODECDecoder*)data;
++  if (decoder->pVdecCtx) {
++    av_log(NULL, AV_LOG_ERROR, "stcodec release decoder\n");
++    VDEC_ResetChannel(decoder->pVdecCtx);
++    VDEC_DestoryChannel(decoder->pVdecCtx);
++    decoder->pVdecCtx = NULL;
++  }
++  av_buffer_unref(&decoder->frames_ref);
++  av_buffer_unref(&decoder->device_ref);
++  av_free(decoder);
++}
++
++static int stcodec_init_decoder(AVCodecContext* avctx) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  STCODECDecoder* decoder = NULL;
++  MppCodingType codectype = CODING_UNKNOWN;
++  int ret;
++/*
++  if (avctx->width > 4096 || avctx->height > 2160 || avctx->width <= 640 ||
++      avctx->height <= 480) {
++    av_log(avctx, AV_LOG_ERROR,
++           "STCODEC Decoder do not support the size (%d x %d), too big or too "
++           "small!\n",
++           avctx->width, avctx->height);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++*/
++  avctx->pix_fmt = ff_get_format(avctx, avctx->codec->pix_fmts);
++  av_log(avctx, AV_LOG_ERROR, "------------------------ Use pixel format %d\n", avctx->pix_fmt);
++
++  // create a decoder and a ref to it
++  decoder = av_mallocz(sizeof(STCODECDecoder));
++  if (!decoder) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to av_mallocz STCODECDecoder\n");
++    ret = AVERROR(ENOMEM);
++    goto fail;
++  }
++
++  decoder->ePixFmt = avctx->pix_fmt;
++
++  st_context->decoder_ref = av_buffer_create(
++      (uint8_t*)decoder, sizeof(*decoder), stcodec_release_stcodec_decoder,
++      NULL, AV_BUFFER_FLAG_READONLY);
++  if (!st_context->decoder_ref) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to create ref of STCODECDecoder!\n");
++    av_free(decoder);
++    ret = AVERROR(ENOMEM);
++    goto fail;
++  }
++
++  av_log(avctx, AV_LOG_DEBUG, "Initializing STCODEC decoder.\n");
++
++  codectype = stcodec_get_codingtype(avctx);
++  if (CODING_UNKNOWN == codectype) {
++    av_log(avctx, AV_LOG_ERROR, "Unknown codec type (%d).\n", avctx->codec_id);
++    av_free(decoder);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++
++  // Create the MPP context
++  decoder->pVdecCtx = VDEC_CreateChannel();
++  if (!decoder->pVdecCtx) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to create STCODEC VDEC channel.\n");
++    av_free(decoder);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++
++  // set para
++  decoder->pVdecCtx->stVdecPara.eCodingType = codectype;
++  decoder->pVdecCtx->stVdecPara.bInputBlockModeEnable = MPP_FALSE;
++  decoder->pVdecCtx->stVdecPara.bOutputBlockModeEnable = MPP_TRUE;
++  decoder->pVdecCtx->stVdecPara.nWidth = avctx->width;
++  decoder->pVdecCtx->stVdecPara.nHeight = avctx->height;
++  decoder->pVdecCtx->stVdecPara.nStride = get_stride(avctx->width, 8);
++  decoder->pVdecCtx->stVdecPara.eOutputPixelFormat = PIXEL_FORMAT_NV12;
++  decoder->pVdecCtx->eCodecType = CODEC_V4L2_LINLONV5V7;
++  decoder->pVdecCtx->stVdecPara.nScale = 1;
++  decoder->pVdecCtx->stVdecPara.nHorizonScaleDownRatio = 1;
++  decoder->pVdecCtx->stVdecPara.nVerticalScaleDownRatio = 1;
++  decoder->pVdecCtx->stVdecPara.nRotateDegree = 0;
++  decoder->pVdecCtx->stVdecPara.bThumbnailMode = 0;
++  decoder->pVdecCtx->stVdecPara.bIsInterlaced = MPP_FALSE;
++
++  // vdec init
++  ret = VDEC_Init(decoder->pVdecCtx);
++  if (ret) {
++    av_log(avctx, AV_LOG_ERROR,
++           "Failed to initialize STCODEC VDEV (ret = %d).\n", ret);
++    VDEC_DestoryChannel(decoder->pVdecCtx);
++    av_free(decoder);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++
++  av_log(avctx, AV_LOG_ERROR, "init 1.\n");
++  // mpp packet init
++  decoder->pPacket = PACKET_Create();
++  if (!decoder->pPacket) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to initialize STCODEC packet.\n");
++    VDEC_DestoryChannel(decoder->pVdecCtx);
++    av_free(decoder);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++  PACKET_Alloc(decoder->pPacket, PACKET_SIZE);
++
++  av_log(avctx, AV_LOG_ERROR, "init 2.\n");
++  // mpp frame init
++  decoder->pFrame = FRAME_Create();
++  if (!decoder->pFrame) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to initialize STCODEC frame.\n");
++    PACKET_Destory(decoder->pPacket);
++    VDEC_DestoryChannel(decoder->pVdecCtx);
++    av_free(decoder);
++    ret = AVERROR_UNKNOWN;
++    goto fail;
++  }
++
++  av_log(avctx, AV_LOG_ERROR, "init 3.\n");
++  av_log(avctx, AV_LOG_DEBUG, "STCODEC decoder initialized successfully.\n");
++
++  decoder->device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DRM);
++  if (!decoder->device_ref) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to av_hwdevice_ctx_alloc\n");
++    ret = AVERROR(ENOMEM);
++    goto fail;
++  }
++  av_log(avctx, AV_LOG_ERROR, "init 4.\n");
++  ret = av_hwdevice_ctx_init(decoder->device_ref);
++  if (ret < 0) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to av_hwdevice_ctx_init\n");
++    goto fail;
++  }
++  av_log(avctx, AV_LOG_ERROR, "init 5.\n");
++
++  decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
++  if (!decoder->frames_ref) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to av_hwframe_ctx_alloc\n");
++    ret = AVERROR(ENOMEM);
++    goto fail;
++  }
++  av_log(avctx, AV_LOG_ERROR, "init 6.\n");
++
++  AVHWFramesContext* hwframes;
++  hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
++  hwframes->format = AV_PIX_FMT_DRM_PRIME;
++  hwframes->sw_format = AV_PIX_FMT_NV12;
++  hwframes->width = avctx->width;
++  hwframes->height = avctx->height;
++  ret = av_hwframe_ctx_init(decoder->frames_ref);
++  if (ret < 0) goto fail;
++
++  av_log(avctx, AV_LOG_DEBUG, "Initialized successfully.\n");
++  av_log(avctx, AV_LOG_ERROR, "init 7.\n");
++  return 0;
++
++fail:
++  av_log(avctx, AV_LOG_ERROR, "init 8.\n");
++  av_log(avctx, AV_LOG_ERROR,
++         "Failed to initialize STCODEC decoder, please check!\n");
++  stcodec_close_decoder(avctx);
++  return ret;
++}
++
++static int stcodec_send_packet(AVCodecContext* avctx, const AVPacket* avpkt) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
++  int ret;
++  av_log(avctx, AV_LOG_DEBUG, "start send packet, pts(%ld)\n", avpkt->pts);
++
++  // handle EOF
++  if (!avpkt->size) {
++    av_log(avctx, AV_LOG_ERROR, "Get EOS from parser!\n");
++    decoder->eos_reached = 1;
++    // write a NULL data to decoder to inform it the EOS.
++    ret = stcodec_send_data_to_decoder(avctx, NULL, 0, 0);
++    if (ret)
++      av_log(avctx, AV_LOG_ERROR, "Failed to send EOS to decoder (ret = %d)\n",
++             ret);
++    return ret;
++  }
++
++  // now send packet
++  ret =
++      stcodec_send_data_to_decoder(avctx, avpkt->data, avpkt->size, avpkt->pts);
++  if (ret) {
++    av_log(avctx, AV_LOG_DEBUG,
++           "Failed to write data to decoder (code = %d (%s))\n", ret,
++           av_err2str(ret));
++  } else {
++    av_log(avctx, AV_LOG_DEBUG,
++           "OK! Write data to decoder, (size = %d) (ret = %d)\n", avpkt->size,
++           ret);
++  }
++
++  return ret;
++}
++
++static void stcodec_release_frame(void* opaque, uint8_t* data) {
++  AVDRMFrameDescriptor* desc = (AVDRMFrameDescriptor*)data;
++  AVBufferRef* framecontextref = (AVBufferRef*)opaque;
++  STCODECFrameContext* framecontext =
++      (STCODECFrameContext*)framecontextref->data;
++
++  av_log(NULL, AV_LOG_DEBUG, "stcodec release frame\n");
++
++  VDEC_ReturnOutputFrame(
++      ((STCODECDecoder*)framecontext->decoder_ref->data)->pVdecCtx,
++      FRAME_GetBaseData(framecontext->pFrame));
++
++  if (((STCODECDecoder*)framecontext->decoder_ref->data)->ePixFmt ==
++      AV_PIX_FMT_DRM_PRIME) {
++    av_free(desc);
++  }
++  av_buffer_unref(&framecontext->decoder_ref);
++  av_buffer_unref(&framecontextref);
++}
++
++static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
++  AVPacket pkt = {0};
++  int freeslots;
++  STCODECFrameContext* framecontext = NULL;
++  AVBufferRef* framecontextref = NULL;
++  MppFrame* mppframe = FRAME_Create();
++  AVDRMFrameDescriptor* desc = NULL;
++  AVDRMLayerDescriptor* layer = NULL;
++  int ret = -1;
++
++  av_log(avctx, AV_LOG_DEBUG, "start receive frame\n");
++
++  if (!decoder->eos_reached) {
++    // we get the available input queue num in decoder
++    VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
++    freeslots = decoder->pVdecPara->nInputQueueLeftNum;
++    av_log(avctx, AV_LOG_ERROR, "--------- Input queue left %d seat!!\n", freeslots);
++
++    if (freeslots > 0) {
++      ret = ff_decode_get_packet(avctx, &pkt);
++      if (ret < 0 && ret != AVERROR_EOF) {
++        av_log(avctx, AV_LOG_ERROR,
++               "Failed to ff_decode_get_packet (ret = %d (%s))\n", ret,
++               av_err2str(ret));
++        return ret;
++      }
++
++      ret = stcodec_send_packet(avctx, &pkt);
++      av_packet_unref(&pkt);
++
++      if (ret < 0) {
++        av_log(avctx, AV_LOG_ERROR,
++               "Failed to send packet to decoder (code = %d (%s))\n", ret,
++               av_err2str(ret));
++        return ret;
++      }
++    }
++
++    // make sure we keep decoder full
++    VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
++    freeslots = decoder->pVdecPara->nInputQueueLeftNum;
++    av_log(avctx, AV_LOG_ERROR, "========== Input queue left %d seat!!\n", freeslots);
++    if (freeslots > 0) return AVERROR(EAGAIN);
++  }
++
++  ret = VDEC_RequestOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++  av_log(avctx, AV_LOG_DEBUG, "Request frame (ret = %d)\n", ret);
++
++  if (ret == MPP_CODER_EOS && mppframe == NULL) {
++    av_log(avctx, AV_LOG_ERROR, "EOS 1!\n");
++    return AVERROR_EOF;
++  }
++
++  if (ret == MPP_CODER_EOS ||
++      FRAME_GetEos(mppframe) == 1 /* || decoder->eos_reached*/) {
++    av_log(avctx, AV_LOG_ERROR, "EOS 2!\n");
++    VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++    return AVERROR_EOF;
++  }
++
++  if (!ret) {
++    av_log(NULL, AV_LOG_DEBUG, "stcodec request a frame\n");
++
++    // setup general frame fields
++    frame->format = avctx->pix_fmt;
++    frame->width = avctx->width;
++    frame->height = avctx->height;
++    // frame->pts              = FRAME_GetPts(decoder->pFrame);
++    frame->interlaced_frame = 0;
++    frame->top_field_first = 0;
++
++    framecontextref = av_buffer_allocz(sizeof(*framecontext));
++    if (!framecontextref) {
++      av_log(avctx, AV_LOG_ERROR, "Failed to alloc AvBufferRef\n");
++      ret = AVERROR(ENOMEM);
++      return ret;
++    }
++
++    // MPP decoder needs to be closed only when all frames have been released.
++    framecontext = (STCODECFrameContext*)framecontextref->data;
++    framecontext->decoder_ref = av_buffer_ref(st_context->decoder_ref);
++    framecontext->pFrame = mppframe;
++
++    if (avctx->pix_fmt == AV_PIX_FMT_DRM_PRIME) {
++      desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
++      if (!desc) {
++        ret = AVERROR(ENOMEM);
++        return ret;
++      }
++
++      desc->nb_objects = 1;
++      desc->objects[0].fd = FRAME_GetFD(mppframe, 0);
++      desc->objects[0].size = frame->width * frame->height * 3 / 2;
++      av_log(avctx, AV_LOG_DEBUG, "fd=%d size=%ld\n", desc->objects[0].fd,
++             desc->objects[0].size);
++      desc->nb_layers = 1;
++      layer = &desc->layers[0];
++      layer->format = DRM_FORMAT_NV12;
++      layer->nb_planes = 2;
++
++      layer->planes[0].object_index = 0;
++      layer->planes[0].offset = 0;
++      layer->planes[0].pitch = frame->width;
++
++      layer->planes[1].object_index = 0;
++      layer->planes[1].offset = frame->width * frame->height;
++      layer->planes[1].pitch = frame->width;
++
++      frame->data[0] = (uint8_t*)desc;
++      frame->buf[0] =
++          av_buffer_create((uint8_t*)desc, sizeof(*desc), stcodec_release_frame,
++                           framecontextref, AV_BUFFER_FLAG_READONLY);
++    } else if (avctx->pix_fmt == AV_PIX_FMT_NV12) {
++      frame->linesize[0] = get_stride(avctx->width, 8);
++      frame->linesize[1] = get_stride(avctx->width, 8);
++      frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
++      frame->data[1] = frame->data[0] + frame->width * frame->height;
++      frame->buf[0] = av_buffer_create(
++          (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
++          stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
++    }
++
++    if (!frame->buf[0]) {
++      av_log(avctx, AV_LOG_ERROR,
++             "Failed to create AVDRMFrameDescriptor ref\n");
++      ret = AVERROR(ENOMEM);
++      return ret;
++    }
++
++    frame->hw_frames_ctx = av_buffer_ref(decoder->frames_ref);
++    if (!frame->hw_frames_ctx) {
++      av_log(avctx, AV_LOG_ERROR, "Failed to create hw_frames_ctx\n");
++      ret = AVERROR(ENOMEM);
++      return ret;
++    }
++
++  } else {
++    // return AVERROR_UNKNOWN;
++    return AVERROR(EAGAIN);
++  }
++
++  return 0;  // return AVERROR(EAGAIN);
++}
++
++static void stcodec_flush(AVCodecContext* avctx) {
++  STCODECDecodeContext* st_context = avctx->priv_data;
++  STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
++  int ret = -1;
++
++  av_log(avctx, AV_LOG_ERROR, "Flush.\n");
++/*
++  ret = VDEC_ResetChannel(decoder->pVdecCtx);
++  if (ret)
++    av_log(avctx, AV_LOG_ERROR, "Failed to reset VDEC Channel (code = %d)\n",
++           ret);
++*/
++  decoder->eos_reached = 0;
++}
++
++static const AVCodecHWConfigInternal* const stcodec_hw_configs[] = {
++    HW_CONFIG_INTERNAL(DRM_PRIME), NULL};
++
++#define STCODEC_DEC_CLASS(NAME)                       \
++  static const AVClass stcodec_##NAME##_dec_class = { \
++      .class_name = "stcodec_" #NAME "_dec",          \
++      .version = LIBAVUTIL_VERSION_INT,               \
++  };
++
++#define STCODEC_DEC(NAME, ID, BSFS)                                           \
++  STCODEC_DEC_CLASS(NAME)                                                     \
++  AVCodec ff_##NAME##_stcodec_decoder = {                               \
++      .name = #NAME "_stcodec",                                             \
++      .long_name = NULL_IF_CONFIG_SMALL(#NAME " (stcodec decoder)"),        \
++      .type = AVMEDIA_TYPE_VIDEO,                                           \
++      .id = ID,                                                             \
++      .priv_data_size = sizeof(STCODECDecodeContext),                         \
++      .init = stcodec_init_decoder,                                           \
++      .close = stcodec_close_decoder,                                         \
++      .receive_frame = stcodec_receive_frame,                       \
++      .flush = stcodec_flush,                                                 \
++      .priv_class = &stcodec_##NAME##_dec_class,                            \
++      .capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING |     \
++                        AV_CODEC_CAP_HARDWARE,                                \
++      .pix_fmts =                                                           \
++          (const enum AVPixelFormat[]){AV_PIX_FMT_DRM_PRIME, AV_PIX_FMT_NV12, \
++                                       AV_PIX_FMT_NONE},                      \
++      .hw_configs = stcodec_hw_configs,                                       \
++      .bsfs = BSFS,                                                           \
++      .wrapper_name = "stcodec",                                            \
++  };
++
++STCODEC_DEC(h264, AV_CODEC_ID_H264, "h264_mp4toannexb")
++STCODEC_DEC(hevc, AV_CODEC_ID_HEVC, "hevc_mp4toannexb")
++STCODEC_DEC(mjpeg, AV_CODEC_ID_MJPEG, NULL)
+-- 
+2.25.1
+

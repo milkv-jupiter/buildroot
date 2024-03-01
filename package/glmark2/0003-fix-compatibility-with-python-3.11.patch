@@ -1,0 +1,48 @@
+From 67ac4d9efb240a9179e056efd79ba5c5ee436c5e Mon Sep 17 00:00:00 2001
+From: dengbo <bo.deng@spacemit.com>
+Date: Tue, 21 Nov 2023 20:09:24 +0800
+Subject: [PATCH] fix compatibility with python-3.11
+
+---
+ waflib/ConfigSet.py | 2 +-
+ waflib/Context.py   | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/waflib/ConfigSet.py b/waflib/ConfigSet.py
+index 16142a2..87de4ad 100644
+--- a/waflib/ConfigSet.py
++++ b/waflib/ConfigSet.py
+@@ -140,7 +140,7 @@ class ConfigSet(object):
+ 		Utils.writef(filename,''.join(buf))
+ 	def load(self,filename):
+ 		tbl=self.table
+-		code=Utils.readf(filename,m='rU')
++		code=Utils.readf(filename,m='r')
+ 		for m in re_imp.finditer(code):
+ 			g=m.group
+ 			tbl[g(2)]=eval(g(3))
+diff --git a/waflib/Context.py b/waflib/Context.py
+index 8f2cbfb..77f310e 100644
+--- a/waflib/Context.py
++++ b/waflib/Context.py
+@@ -109,7 +109,7 @@ class Context(ctx):
+ 				cache[node]=True
+ 				self.pre_recurse(node)
+ 				try:
+-					function_code=node.read('rU',encoding)
++					function_code=node.read('r',encoding)
+ 					exec(compile(function_code,node.abspath(),'exec'),self.exec_dict)
+ 				finally:
+ 					self.post_recurse(node)
+@@ -340,7 +340,7 @@ def load_module(path,encoding=None):
+ 		pass
+ 	module=imp.new_module(WSCRIPT_FILE)
+ 	try:
+-		code=Utils.readf(path,m='rU',encoding=encoding)
++		code=Utils.readf(path,m='r',encoding=encoding)
+ 	except EnvironmentError:
+ 		raise Errors.WafError('Could not read the file %r'%path)
+ 	module_dir=os.path.dirname(path)
+-- 
+2.34.1
+

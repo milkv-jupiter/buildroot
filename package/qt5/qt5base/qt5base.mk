@@ -194,6 +194,10 @@ QT5BASE_DEPENDENCIES   += xlib_libXext
 endif
 else
 QT5BASE_CONFIGURE_OPTS += -no-xcb
+ifeq ($(BR2_PACKAGE_QT5WAYLAND),y)
+QT5BASE_CONFIGURE_OPTS += -xkbcommon
+QT5BASE_DEPENDENCIES   += libxkbcommon
+endif
 endif
 
 ifeq ($(BR2_PACKAGE_QT5BASE_OPENGL_DESKTOP),y)

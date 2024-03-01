@@ -4,9 +4,9 @@
 #
 ################################################################################
 
-WESTON_VERSION = 10.0.1
-WESTON_SITE = https://gitlab.freedesktop.org/wayland/weston/-/releases/$(WESTON_VERSION)/downloads
-WESTON_SOURCE = weston-$(WESTON_VERSION).tar.xz
+WESTON_VERSION = 10.0.3
+WESTON_SITE = https://gitlab.freedesktop.org/wayland/weston/-/archive/$(WESTON_VERSION)
+WESTON_SOURCE = weston-$(WESTON_VERSION).tar.bz2
 WESTON_LICENSE = MIT
 WESTON_LICENSE_FILES = COPYING
 WESTON_CPE_ID_VENDOR = wayland
@@ -186,5 +186,13 @@ WESTON_DEPENDENCIES += pango
 else
 WESTON_CONF_OPTS += -Ddemo-clients=false
 endif
+
+define WESTON_INSTALL_CONF_ON_TARGET
+	mkdir -p $(TARGET_DIR)/etc/xdg
+	$(INSTALL) -D -m 0644 package/weston/weston.ini $(TARGET_DIR)/etc/xdg/weston/weston.ini
+	$(INSTALL) -D -m 0755 package/weston/run_weston.sh $(TARGET_DIR)/root/run_weston.sh
+endef
+
+WESTON_POST_INSTALL_TARGET_HOOKS += WESTON_INSTALL_CONF_ON_TARGET
 
 $(eval $(meson-package))

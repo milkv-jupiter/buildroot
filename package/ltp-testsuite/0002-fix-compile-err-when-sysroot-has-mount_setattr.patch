@@ -1,0 +1,12 @@
+diff --git a/include/lapi/fsmount.h b/include/lapi/fsmount.h
+index 07eb42f..1bcc5b4 100644
+--- a/include/lapi/fsmount.h
++++ b/include/lapi/fsmount.h
+@@ -48,6 +48,7 @@
+ # define ST_NOSYMFOLLOW 0x2000 /* do not follow symlinks */
+ #endif
+ 
++#define HAVE_STRUCT_MOUNT_ATTR 1
+ #ifndef HAVE_STRUCT_MOUNT_ATTR
+ /*
+  * mount_setattr()

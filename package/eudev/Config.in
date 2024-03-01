@@ -16,7 +16,7 @@ config BR2_PACKAGE_EUDEV
 	  Upstart, older kernels, various toolchains and anything else
 	  required by users and various distributions.
 
-	  https://github.com/eudev-project/eudev
+	  https://wiki.gentoo.org/wiki/Project:Eudev
 
 if BR2_PACKAGE_EUDEV
 

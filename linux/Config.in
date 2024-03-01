@@ -85,6 +85,11 @@ config BR2_LINUX_KERNEL_CUSTOM_TARBALL
 	  to use a make variable like $(TOPDIR) to reference the root of
 	  the Buildroot tree.
 
+config BR2_LINUX_KERNEL_CUSTOM_DIR
+	bool "Custom local dir"
+	help
+      allows to specify a URL to your local kernel dir
+
 config BR2_LINUX_KERNEL_CUSTOM_GIT
 	bool "Custom Git repository"
 	help
@@ -94,7 +99,7 @@ config BR2_LINUX_KERNEL_CUSTOM_GIT
 config BR2_LINUX_KERNEL_CUSTOM_HG
 	bool "Custom Mercurial repository"
 	help
-	  This option allows Buildroot to get the Linux kernel source
+      This option allows Buildroot to get the Linux kernel source
 	  code from a Mercurial repository.
 
 config BR2_LINUX_KERNEL_CUSTOM_SVN
@@ -112,6 +117,15 @@ config BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE
 config BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION
 	string "URL of custom kernel tarball"
 	depends on BR2_LINUX_KERNEL_CUSTOM_TARBALL
+
+config BR2_LINUX_KERNEL_CUSTOM_DIR_LOCATION
+	string "URL of custom kernel local dir"
+	depends on BR2_LINUX_KERNEL_CUSTOM_DIR
+    help
+      example: $(TOPDIR)/../to/your/kernel-dir
+	  $(TOPDIR) to reference the root of
+	  the Buildroot tree.
+
 
 if BR2_LINUX_KERNEL_CUSTOM_GIT || BR2_LINUX_KERNEL_CUSTOM_HG || BR2_LINUX_KERNEL_CUSTOM_SVN
 
@@ -134,6 +148,7 @@ config BR2_LINUX_KERNEL_VERSION
 	default BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE \
 		if BR2_LINUX_KERNEL_CUSTOM_VERSION
 	default "custom" if BR2_LINUX_KERNEL_CUSTOM_TARBALL
+	default "custom" if BR2_LINUX_KERNEL_CUSTOM_DIR
 	default BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION \
 		if BR2_LINUX_KERNEL_CUSTOM_GIT || BR2_LINUX_KERNEL_CUSTOM_HG || BR2_LINUX_KERNEL_CUSTOM_SVN
 

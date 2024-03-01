@@ -43,6 +43,8 @@ ifeq ($(BR2_INIT_BUSYBOX),y)
 define HOST_DRACUT_POST_INSTALL_BUSYBOX_INIT_MODULE
 	$(INSTALL) -D -m 0755 package/dracut/busybox-init-module-setup.sh \
 		$(HOST_DIR)/lib/dracut/modules.d/05busybox-init/module-setup.sh
+	$(INSTALL) -D -m 0755 package/dracut/rescue-module-setup.sh \
+		$(HOST_DIR)/lib/dracut/modules.d/03rescue/module-setup.sh
 endef
 HOST_DRACUT_POST_INSTALL_HOOKS += HOST_DRACUT_POST_INSTALL_BUSYBOX_INIT_MODULE
 endif

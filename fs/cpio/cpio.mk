@@ -23,6 +23,7 @@ define ROOTFS_CPIO_ADD_INIT
 	fi
 	mkdir -p $(TARGET_DIR)/dev
 	mknod -m 0622 $(TARGET_DIR)/dev/console c 5 1
+	mknod -m 0622 $(TARGET_DIR)/dev/null c 1 3
 endef
 
 endif # BR2_ROOTFS_DEVICE_CREATION_STATIC

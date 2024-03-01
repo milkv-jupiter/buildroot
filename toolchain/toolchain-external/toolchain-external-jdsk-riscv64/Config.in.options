@@ -1,0 +1,9 @@
+if BR2_TOOLCHAIN_EXTERNAL_JDSK_RISCV64
+
+config BR2_TOOLCHAIN_EXTERNAL_PREFIX
+	default "riscv64-unknown-linux-gnu"
+
+config BR2_PACKAGE_PROVIDES_TOOLCHAIN_EXTERNAL
+	default "toolchain-external-jdsk-riscv64"
+
+endif

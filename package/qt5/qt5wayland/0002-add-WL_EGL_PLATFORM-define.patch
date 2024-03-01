@@ -1,0 +1,13 @@
+diff --git a/src/hardwareintegration/compositor/wayland-egl/wayland-egl.pri b/src/hardwareintegration/compositor/wayland-egl/wayland-egl.pri
+index e20c680..e1f8de8 100644
+--- a/src/hardwareintegration/compositor/wayland-egl/wayland-egl.pri
++++ b/src/hardwareintegration/compositor/wayland-egl/wayland-egl.pri
+@@ -3,6 +3,8 @@ INCLUDEPATH += $$PWD
+ QMAKE_USE_PRIVATE += egl wayland-server wayland-egl
+ 
+ QT += egl_support-private
++#WL_EGL_PLATFORM or __GBM__ or USE_X11 default which will compile crash
++QMAKE_CXXFLAGS += -DWL_EGL_PLATFORM
+ 
+ SOURCES += \
+     $$PWD/waylandeglclientbufferintegration.cpp

@@ -18,6 +18,7 @@ config BR2_PACKAGE_FFMPEG_ARCH_SUPPORTS
 menuconfig BR2_PACKAGE_FFMPEG
 	bool "ffmpeg"
 	depends on BR2_PACKAGE_FFMPEG_ARCH_SUPPORTS
+	select BR2_PACKAGE_MPP
 	help
 	  FFmpeg is a complete, cross-platform solution to record,
 	  convert and stream audio and video.
@@ -31,6 +32,12 @@ config BR2_PACKAGE_FFMPEG_GPL
 	help
 	  allow use of GPL code, the resulting libs and binaries will
 	  be under GPL
+
+config BR2_PACKAGE_FFMPEG_SPACEMIT_CODEC
+	bool "Enable spacemit hardware codec"
+	depends on BR2_PACKAGE_FFMPEG_GPL
+	help
+	  allow use of spacemit hardware codec
 
 config BR2_PACKAGE_FFMPEG_NONFREE
 	bool "Enable nonfree code"

@@ -1,0 +1,19 @@
+config BR2_TOOLCHAIN_EXTERNAL_JDSK_RISCV64
+	bool "spacemit riscv64 v0.1.5"
+	depends on BR2_riscv
+	depends on BR2_HOSTARCH = "x86_64" || BR2_HOSTARCH = "x86"
+    select BR2_TOOLCHAIN_EXTERNAL_GLIBC
+	select BR2_TOOLCHAIN_HAS_SSP
+	select BR2_INSTALL_LIBSTDCPP
+	select BR2_TOOLCHAIN_HEADERS_AT_LEAST_5_10
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_7
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_8
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_9
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_10
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_11
+	select BR2_TOOLCHAIN_GCC_AT_LEAST_12
+	select BR2_TOOLCHAIN_HAS_FORTRAN
+	select BR2_TOOLCHAIN_HAS_OPENMP
+	help
+	  Toolchain for the riscv64 architecture, from
+	  https://www.spacemit.com

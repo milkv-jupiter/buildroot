@@ -12,7 +12,7 @@ UNRAR_LICENSE_FILES = license.txt
 UNRAR_CPE_ID_VENDOR = rarlab
 
 define UNRAR_BUILD_CMDS
-	$(TARGET_MAKE_ENV) $(MAKE) CXX="$(TARGET_CXX)" STRIP="/bin/true" \
+	$(TARGET_MAKE_ENV) $(MAKE1) CXX="$(TARGET_CXX)" STRIP="/bin/true" \
 		CXXFLAGS="$(TARGET_CXXFLAGS) -pthread" \
 		LDFLAGS="$(TARGET_LDFLAGS) -pthread" -C $(@D)
 endef

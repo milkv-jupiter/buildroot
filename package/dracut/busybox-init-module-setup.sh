@@ -55,5 +55,6 @@ install() {
 		/etc/group	\
 		/etc/passwd	\
 		/etc/shadow	\
-		/etc/hostname
+		/etc/hostname \
+        /lib/firmware/esos.elf
 }

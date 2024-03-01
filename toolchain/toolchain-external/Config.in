@@ -8,6 +8,9 @@ choice
 # Kept toolchains sorted by architecture in order to use some toolchain
 # as default choice
 
+#riscv64 default
+source "toolchain/toolchain-external/toolchain-external-jdsk-riscv64/Config.in"
+
 # Aarch64 (use ARM toolchain by default)
 source "toolchain/toolchain-external/toolchain-external-arm-aarch64/Config.in"
 source "toolchain/toolchain-external/toolchain-external-linaro-aarch64/Config.in"
@@ -111,6 +114,9 @@ config BR2_TOOLCHAIN_EXTERNAL_PREFIX
 # Kept toolchains sorted as in the choice above
 # The toolchain Config.in.options must define
 # BR2_PACKAGE_PROVIDES_TOOLCHAIN_EXTERNAL and BR2_TOOLCHAIN_EXTERNAL_PREFIX
+
+#riscv64 default
+source "toolchain/toolchain-external/toolchain-external-jdsk-riscv64/Config.in.options"
 
 # Aarch64
 source "toolchain/toolchain-external/toolchain-external-arm-aarch64/Config.in.options"

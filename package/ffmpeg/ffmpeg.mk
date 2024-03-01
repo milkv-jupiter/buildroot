@@ -66,6 +66,12 @@ else
 FFMPEG_CONF_OPTS += --disable-gpl
 endif
 
+ifeq ($(BR2_PACKAGE_FFMPEG_SPACEMIT_CODEC),y)
+FFMPEG_DEPENDENCIES += mpp
+FFMPEG_CONF_OPTS += --extra-libs=-lspacemit_mpp
+FFMPEG_CONF_OPTS += --enable-stcodec
+endif
+
 ifeq ($(BR2_PACKAGE_FFMPEG_NONFREE),y)
 FFMPEG_CONF_OPTS += --enable-nonfree
 else

@@ -29,6 +29,9 @@ config BR2_TARGET_OPENSBI_CUSTOM_VERSION
 config BR2_TARGET_OPENSBI_CUSTOM_TARBALL
 	bool "Custom tarball"
 
+config BR2_TARGET_OPENSBI_CUSTOM_LOCAL
+	bool "Custom local dir"
+
 config BR2_TARGET_OPENSBI_CUSTOM_GIT
 	bool "Custom Git repository"
 
@@ -41,6 +44,14 @@ config BR2_TARGET_OPENSBI_CUSTOM_VERSION_VALUE
 config BR2_TARGET_OPENSBI_CUSTOM_TARBALL_LOCATION
 	string "URL of custom OpenSBI tarball"
 	depends on BR2_TARGET_OPENSBI_CUSTOM_TARBALL
+
+config BR2_TARGET_OPENSBI_CUSTOM_LOCAL_DIR
+	string "URL of custom OpenSBI dir"
+	depends on BR2_TARGET_OPENSBI_CUSTOM_LOCAL
+    help
+        $(TOPDIR)/../path/to/your/opensbi-dir, 
+        TOPDIR is your buildroot root dir
+
 
 if BR2_TARGET_OPENSBI_CUSTOM_GIT
 
