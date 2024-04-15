@@ -1,0 +1,76 @@
+From 65302ef6df4dd3a8228e0347163aa6d91e82991c Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Mon, 8 Apr 2024 15:41:53 +0800
+Subject: [PATCH] stcodecenc support YUV420P and fix some small bugs
+
+---
+ libavcodec/stcodecdec.c |  1 +
+ libavcodec/stcodecenc.c | 19 ++++++++++++++++---
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+index 6acb89f..0300554 100755
+--- a/libavcodec/stcodecdec.c
++++ b/libavcodec/stcodecdec.c
+@@ -566,6 +566,7 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+ 
+   if (ret == MPP_CODER_NO_DATA) {
+     av_log(avctx, AV_LOG_ERROR, "no data, return\n");
++    usleep(5000);
+     ret = AVERROR(EAGAIN);
+     goto fail;
+   }
+diff --git a/libavcodec/stcodecenc.c b/libavcodec/stcodecenc.c
+index 30025e2..c976dec 100755
+--- a/libavcodec/stcodecenc.c
++++ b/libavcodec/stcodecenc.c
+@@ -60,6 +60,19 @@ typedef struct {
+   AVBufferRef* encoder_ref;
+ } STCODECEncodeContext;
+ 
++static MppPixelFormat stcodec_get_pixelformat(AVCodecContext* avctx) {
++  switch (avctx->pix_fmt) {
++    case AV_PIX_FMT_NV12:
++      return PIXEL_FORMAT_NV12;
++    case AV_PIX_FMT_YUV420P:
++      return PIXEL_FORMAT_I420;
++    case AV_PIX_FMT_DRM_PRIME:
++      return PIXEL_FORMAT_NV12;
++    default:
++      return PIXEL_FORMAT_UNKNOWN;
++  }
++}
++
+ static MppCodingType stcodec_get_codingtype(AVCodecContext* avctx) {
+   switch (avctx->codec_id) {
+     case AV_CODEC_ID_H264:
+@@ -109,7 +122,7 @@ static int stcodec_receive_packet(AVCodecContext* avctx, AVPacket* avpkt) {
+       FRAME_SetDataUsedNum(encoder->pFrame, 3);
+       FRAME_SetDataPointer(encoder->pFrame, 0, frame->data[0]);
+       FRAME_SetDataPointer(encoder->pFrame, 1, frame->data[1]);
+-      FRAME_SetDataPointer(encoder->pFrame, 2, frame->data[3]);
++      FRAME_SetDataPointer(encoder->pFrame, 2, frame->data[2]);
+     } else if (frame->format == AV_PIX_FMT_DRM_PRIME) {
+       void* vaddr =
+           mmap(NULL, ((AVDRMFrameDescriptor*)(frame->data[0]))->objects[0].size,
+@@ -274,7 +287,7 @@ static av_cold int stcodec_init_encoder(AVCodecContext* avctx) {
+   encoder->pVencCtx->stVencPara.nWidth = avctx->width;
+   encoder->pVencCtx->stVencPara.nHeight = avctx->height;
+   encoder->pVencCtx->stVencPara.nStride = get_stride(avctx->width, 8);
+-  encoder->pVencCtx->stVencPara.PixelFormat = PIXEL_FORMAT_NV12;
++  encoder->pVencCtx->stVencPara.PixelFormat = stcodec_get_pixelformat(avctx);
+   encoder->pVencCtx->stVencPara.eFrameBufferType =
+       MPP_FRAME_BUFFERTYPE_NORMAL_EXTERNAL;
+   encoder->pVencCtx->eCodecType = CODEC_V4L2_LINLONV5V7;
+@@ -349,7 +362,7 @@ static const AVCodecHWConfigInternal* const stcodec_hw_configs[] = {
+       .wrapper_name = "stcodec",                                            \
+       .pix_fmts =                                                           \
+           (const enum AVPixelFormat[]){AV_PIX_FMT_DRM_PRIME, AV_PIX_FMT_NV12, \
+-                                       AV_PIX_FMT_NONE},                      \
++                                       AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE},   \
+       .hw_configs = stcodec_hw_configs,                                       \
+   };
+ 
+-- 
+2.25.1
+

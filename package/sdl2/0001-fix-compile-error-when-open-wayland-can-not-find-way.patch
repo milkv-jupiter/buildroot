@@ -1,0 +1,27 @@
+From fcc00b5cfd9ba11b969c3884024fae6792474cfb Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Mon, 11 Mar 2024 19:44:13 +0800
+Subject: [PATCH] fix compile error when open wayland: can not find
+ wayland-scanner
+
+---
+ configure | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index 108ba53..a42b5ae 100755
+--- a/configure
++++ b/configure
+@@ -23128,7 +23128,8 @@ printf %s "checking for Wayland support... " >&6; }
+             if $PKG_CONFIG --exists 'wayland-client >= 1.18' wayland-scanner wayland-egl wayland-cursor egl 'xkbcommon >= 0.5.0'; then
+                 WAYLAND_CFLAGS=`$PKG_CONFIG --cflags wayland-client wayland-egl wayland-cursor xkbcommon`
+                 WAYLAND_LIBS=`$PKG_CONFIG --libs wayland-client wayland-egl wayland-cursor xkbcommon`
+-                WAYLAND_SCANNER=`$PKG_CONFIG --variable=wayland_scanner wayland-scanner`
++                #WAYLAND_SCANNER=`$PKG_CONFIG --variable=wayland_scanner wayland-scanner`
++                WAYLAND_SCANNER="$srcdir/../../host/bin/wayland-scanner"
+                 if $PKG_CONFIG --exists 'wayland-scanner >= 1.15'
+ then :
+   WAYLAND_SCANNER_CODE_MODE=private-code
+-- 
+2.25.1
+

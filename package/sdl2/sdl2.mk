@@ -23,7 +23,6 @@ SDL2_CONF_OPTS += \
 	--disable-video-vivante \
 	--disable-video-cocoa \
 	--disable-video-metal \
-	--disable-video-wayland \
 	--disable-video-dummy \
 	--disable-video-offscreen \
 	--disable-video-vulkan \
@@ -37,7 +36,8 @@ SDL2_CONF_OPTS += \
 	--disable-hidapi-joystick \
 	--disable-hidapi-libusb \
 	--disable-joystick-virtual \
-	--disable-render-d3d
+	--disable-render-d3d \
+	--disable-oss
 
 # We are using autotools build system for sdl2, so the sdl2-config.cmake
 # include path are not resolved like for sdl2-config script.
@@ -180,5 +180,8 @@ SDL2_CONF_OPTS += --enable-video-kmsdrm
 else
 SDL2_CONF_OPTS += --disable-video-kmsdrm
 endif
+
+SDL2_DEPENDENCIES += wayland libxkbcommon
+SDL2_CONF_OPTS += --enable-video-wayland
 
 $(eval $(autotools-package))

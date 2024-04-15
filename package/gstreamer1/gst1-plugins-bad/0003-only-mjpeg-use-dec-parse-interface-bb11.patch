@@ -1,0 +1,406 @@
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.c b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+index 6a989e0..48b5b7f 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+@@ -50,6 +50,7 @@ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder *decoder);
+ static GstFlowReturn gst_spacemitdec_handle_frame(GstVideoDecoder *decoder, GstVideoCodecFrame *frame);
+ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder *decoder, GstQuery *query);
+ static GstStateChangeReturn gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transition);
++static GstFlowReturn gst_spacemitdec_parse (GstVideoDecoder * bdec, GstVideoCodecFrame * frame, GstAdapter * adapter, gboolean at_eos);
+ 
+ /* pad templates */
+ static GstStaticPadTemplate gst_spacemitdec_sink_template =
+@@ -73,8 +74,8 @@ GST_STATIC_PAD_TEMPLATE ("sink",
+     "parsed = (boolean) true,"
+     "systemstream = (boolean) false"
+     ";"
+-    "image/jpeg"
+-    ";"
++//    "image/jpeg"
++//    ";"
+     "video/x-vp8"
+     ";"
+     "video/x-vp9"
+@@ -204,6 +205,7 @@ static void gst_spacemitdec_class_init(GstSpacemitDecClass * klass)
+   video_decoder_class->finish = GST_DEBUG_FUNCPTR(gst_spacemitdec_finish);
+   video_decoder_class->handle_frame = GST_DEBUG_FUNCPTR(gst_spacemitdec_handle_frame);
+   video_decoder_class->decide_allocation = GST_DEBUG_FUNCPTR(gst_spacemitdec_decide_allocation);
++  video_decoder_class->parse = gst_spacemitdec_parse;
+ 
+ //  element_class->change_state = GST_DEBUG_FUNCPTR (gst_spacemitdec_dec_change_state);
+ 
+@@ -359,6 +361,9 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+   if (thiz->save_dec)
+     thiz->fb = fopen("/tmp/spacemitdec_out.yuv", "wb+");
+   
++  thiz->saw_header = FALSE;
++  thiz->parse_entropy_len = 0;
++  thiz->parse_resync = FALSE;
+   GST_DEBUG_OBJECT (thiz, "finish start ! (%d)", thiz->save_dec);
+ 
+ 	return TRUE;
+@@ -370,6 +375,10 @@ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+   if (thiz->save_dec)
+     fclose(thiz->fb);
+ 
++  thiz->parse_entropy_len = 0;
++  thiz->parse_resync = FALSE;
++  thiz->saw_header = FALSE;
++
+   if (!(gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED)) {
+     GST_DEBUG_OBJECT (thiz, "ZRong --------------- spacemitdec finish stop");
+     return TRUE;
+@@ -436,7 +445,8 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+ 
+     thiz->ctx->stVdecPara.bInputBlockModeEnable = MPP_TRUE;
+     thiz->ctx->stVdecPara.bOutputBlockModeEnable = MPP_TRUE;
+-    GST_DEBUG_OBJECT (thiz, "spacemitdec set eCodecType is %d, downscale:%u", thiz->ctx->eCodecType, thiz->downscale);
++    GST_DEBUG_OBJECT (thiz, "spacemitdec set eCodecType is %d, downscale:%u, eCodingType:%d",
++       thiz->ctx->eCodecType, thiz->downscale, thiz->eCodingType);
+ 
+     ret = VDEC_Init (thiz->ctx);
+     if (ret) {
+@@ -460,6 +470,7 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+   GstStructure *structure;
+   gboolean ret = TRUE;
++  gboolean parsed = FALSE;
+ 
+ 	GST_DEBUG_OBJECT(thiz, "input caps: %" GST_PTR_FORMAT, state->caps);
+ 
+@@ -473,11 +484,16 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+   if (!gst_spacemitdec_init_decoder(thiz))
+     return FALSE;
+ 
+-	GST_DEBUG_OBJECT (thiz, "@@@ ZRong ------------------------- set_format (%d, %d, %d), (%d, %d, %d)",
++  if (thiz->eCodingType == CODING_MJPEG) {
++    structure = gst_caps_get_structure (state->caps, 0);
++    gst_structure_get_boolean (structure, "parsed", &parsed);
++    gst_video_decoder_set_packetized (thiz, parsed);
++  }
++	GST_DEBUG_OBJECT (thiz, "set format finish (%d, %d, %d), (%d, %d, %d)",
+     thiz->input_state->info.width, thiz->input_state->info.height, thiz->input_state->info.size,
+     state->info.width, state->info.height, state->info.size);
+-  GST_DEBUG_OBJECT (thiz, "ZRong ----------------------- set format finish, %u, %s",
+-    GST_VIDEO_INFO_FORMAT (&state->info), gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (&state->info)));
++  GST_DEBUG_OBJECT (thiz, "set format finish (%u, %s), parsed: %d",
++    GST_VIDEO_INFO_FORMAT (&state->info), gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (&state->info)), parsed);
+ 
+ 	return TRUE;
+ }
+@@ -1130,6 +1146,202 @@ flushing:
+ }
+ }
+ 
++static inline gboolean
++gst_spacemitdec_parse_tag_has_entropy_segment (guint8 tag)
++{
++  if (tag == 0xda || (tag >= 0xd0 && tag <= 0xd7))
++    return TRUE;
++  return FALSE;
++}
++
++//code from jpegdec
++static GstFlowReturn
++gst_spacemitdec_parse (GstVideoDecoder * bdec, GstVideoCodecFrame * frame,
++    GstAdapter * adapter, gboolean at_eos)
++{
++  guint size;
++  gint toadd = 0;
++  gboolean resync;
++  gint offset = 0, noffset;
++  GstSpacemitDec *thiz = GST_SPACEMITDEC (bdec);
++
++  if (thiz->eCodingType != CODING_MJPEG) {
++    GST_ERROR_OBJECT (thiz, "only support mjpeg for parse, eCodingType:%d", thiz->eCodingType);
++    return GST_FLOW_ERROR;
++  }
++
++  GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
++
++  /* FIXME : The overhead of using scan_uint32 is massive */
++
++  size = gst_adapter_available (adapter);
++  GST_DEBUG_OBJECT (thiz, "Parsing jpeg image data (%u bytes)", size);
++
++  if (at_eos) {
++    GST_DEBUG_OBJECT (thiz, "Flushing all data out");
++    toadd = size;
++
++    /* If we have leftover data, throw it away */
++    if (!thiz->saw_header)
++      goto drop_frame;
++    goto have_full_frame;
++  }
++
++  if (size < 8)
++    goto need_more_data;
++
++  if (!thiz->saw_header) {
++    gint ret;
++    /* we expect at least 4 bytes, first of which start marker */
++    ret =
++        gst_adapter_masked_scan_uint32 (adapter, 0xffff0000, 0xffd80000, 0,
++        size - 4);
++
++    GST_DEBUG_OBJECT (thiz, "ret:%d", ret);
++    if (ret < 0)
++      goto need_more_data;
++
++    if (ret) {
++      gst_adapter_flush (adapter, ret);
++      size -= ret;
++    }
++    thiz->saw_header = TRUE;
++  }
++
++  while (1) {
++    guint frame_len;
++    guint32 value;
++
++    GST_DEBUG_OBJECT (thiz, "offset:%d, size:%d", offset, size);
++
++    noffset =
++        gst_adapter_masked_scan_uint32_peek (adapter, 0x0000ff00, 0x0000ff00,
++        offset, size - offset, &value);
++
++    /* lost sync if 0xff marker not where expected */
++    if ((resync = (noffset != offset))) {
++      GST_DEBUG_OBJECT (thiz, "Lost sync at 0x%08x, resyncing", offset + 2);
++    }
++    /* may have marker, but could have been resyncng */
++    resync = resync || thiz->parse_resync;
++    /* Skip over extra 0xff */
++    while ((noffset >= 0) && ((value & 0xff) == 0xff)) {
++      noffset++;
++      noffset =
++          gst_adapter_masked_scan_uint32_peek (adapter, 0x0000ff00, 0x0000ff00,
++          noffset, size - noffset, &value);
++    }
++    /* enough bytes left for marker? (we need 0xNN after the 0xff) */
++    if (noffset < 0) {
++      GST_DEBUG_OBJECT (thiz, "at end of input and no EOI marker found, need more data");
++      goto need_more_data;
++    }
++
++    /* now lock on the marker we found */
++    offset = noffset;
++    value = value & 0xff;
++    if (value == 0xd9) {
++      GST_DEBUG_OBJECT (thiz, "0x%08x: EOI marker", offset + 2);
++      /* clear parse state */
++      thiz->saw_header = FALSE;
++      thiz->parse_resync = FALSE;
++      toadd = offset + 4;
++      goto have_full_frame;
++    }
++    if (value == 0xd8) {
++      GST_DEBUG_OBJECT (thiz, "0x%08x: SOI marker before EOI marker", offset + 2);
++
++      /* clear parse state */
++      thiz->saw_header = FALSE;
++      thiz->parse_resync = FALSE;
++      toadd = offset;
++      goto have_full_frame;
++    }
++
++
++    if (value >= 0xd0 && value <= 0xd7)
++      frame_len = 0;
++    else {
++      /* peek tag and subsequent length */
++      if (offset + 2 + 4 > size)
++        goto need_more_data;
++      else
++        gst_adapter_masked_scan_uint32_peek (adapter, 0x0, 0x0, offset + 2, 4,
++            &frame_len);
++      frame_len = frame_len & 0xffff;
++    }
++    GST_DEBUG_OBJECT (thiz, "0x%08x: tag %02x, frame_len=%u", offset + 2, value, frame_len);
++    /* the frame length includes the 2 bytes for the length; here we want at
++     * least 2 more bytes at the end for an end marker */
++    if (offset + 2 + 2 + frame_len + 2 > size) {
++      goto need_more_data;
++    }
++
++    if (gst_spacemitdec_parse_tag_has_entropy_segment (value)) {
++      guint eseglen = thiz->parse_entropy_len;
++
++      GST_DEBUG_OBJECT (thiz, "0x%08x: finding entropy segment length (eseglen:%d)",
++          offset + 2, eseglen);
++      if (size < offset + 2 + frame_len + eseglen)
++        goto need_more_data;
++      noffset = offset + 2 + frame_len + thiz->parse_entropy_len;
++      while (1) {
++        GST_DEBUG_OBJECT (thiz, "noffset:%d, size:%d, size - noffset:%d",
++            noffset, size, size - noffset);
++        noffset = gst_adapter_masked_scan_uint32_peek (adapter, 0x0000ff00,
++            0x0000ff00, noffset, size - noffset, &value);
++        if (noffset < 0) {
++          /* need more data */
++          thiz->parse_entropy_len = size - offset - 4 - frame_len - 2;
++          goto need_more_data;
++        }
++        if ((value & 0xff) != 0x00) {
++          eseglen = noffset - offset - frame_len - 2;
++          break;
++        }
++        noffset++;
++      }
++      thiz->parse_entropy_len = 0;
++      frame_len += eseglen;
++      GST_DEBUG_OBJECT (thiz, "entropy segment length=%u => frame_len=%u", eseglen,
++          frame_len);
++    }
++    if (resync) {
++      /* check if we will still be in sync if we interpret
++       * this as a sync point and skip this frame */
++      noffset = offset + frame_len + 2;
++      noffset = gst_adapter_masked_scan_uint32 (adapter, 0x0000ff00, 0x0000ff00,
++          noffset, 4);
++      if (noffset < 0) {
++        /* ignore and continue resyncing until we hit the end
++         * of our data or find a sync point that looks okay */
++        offset++;
++        continue;
++      }
++      GST_DEBUG_OBJECT (thiz, "found sync at 0x%x", offset + 2);
++    }
++
++    /* Add current data to output buffer */
++    toadd += frame_len + 2;
++    offset += frame_len + 2;
++  }
++
++need_more_data:
++  if (toadd)
++    gst_video_decoder_add_to_frame (bdec, toadd);
++  return GST_VIDEO_DECODER_FLOW_NEED_DATA;
++
++have_full_frame:
++  if (toadd)
++    gst_video_decoder_add_to_frame (bdec, toadd);
++  GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
++  return gst_video_decoder_have_frame (bdec);
++
++drop_frame:
++  gst_adapter_flush (adapter, size);
++  return GST_FLOW_OK;
++}
++
+ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder * decoder)
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.h b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+index 99cfd31..0b0bc22 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.h
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+@@ -69,6 +69,11 @@ struct _GstSpacemitDec
+   gboolean wait_reschange;
+   GstBufferPool *pool;
+   FILE *fb;
++
++  /* parse state */
++  gboolean saw_header;
++  gint     parse_entropy_len;
++  gint     parse_resync;
+ };
+ 
+ struct _GstSpacemitDecClass
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitenc.c b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+index a0c0370..ba9ab6a 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitenc.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+@@ -529,8 +529,6 @@ release_all_buffer (gpointer key, gpointer value, gpointer user_data)
+   GstBuffer *buffer = (GstBuffer *)value;
+   GstSpacemitEnc *thiz = (GstSpacemitEnc *)user_data;
+ 
+-  g_hash_table_remove(thiz->bufs_hash, key);
+-
+   GST_DEBUG_OBJECT (thiz, "release buffer %p, before release ref: %d", buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(buffer));
+   gst_buffer_unref (buffer);
+ }
+@@ -553,6 +551,7 @@ static void drain_all_upstream_buffer (GstSpacemitEnc * thiz)
+     g_hash_table_size(thiz->bufs_hash), try_count);
+ 
+   g_hash_table_foreach (thiz->bufs_hash, release_all_buffer, thiz);
++  g_hash_table_remove_all (thiz->bufs_hash);
+ }
+ 
+ static gint32 gst_spacemitenc_request_packet (GstSpacemitEnc *thiz)
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitplugin.c b/ext/spacemit/spacemitcodec/gstspacemitplugin.c
+index d2d5e62..be75339 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitplugin.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitplugin.c
+@@ -17,9 +17,9 @@ static gboolean plugin_init(GstPlugin *plugin)
+   gboolean ret = FALSE;
+ 
+   ret |= gst_spacemitdec_register (plugin, GST_RANK_PRIMARY + 1);
+-	ret |= gst_spacemitenc_register (plugin, GST_RANK_PRIMARY + 1);
++  ret |= gst_spacemitenc_register (plugin, GST_RANK_PRIMARY - 1);
+ 
+-	return ret;
++  return ret;
+ }
+ 
+ GST_PLUGIN_DEFINE(GST_VERSION_MAJOR,
+diff --git a/ext/spacemit/spacemitcodec/meson.build b/ext/spacemit/spacemitcodec/meson.build
+index c6ed6c3..e7deda1 100755
+--- a/ext/spacemit/spacemitcodec/meson.build
++++ b/ext/spacemit/spacemitcodec/meson.build
+@@ -6,7 +6,7 @@ spacemitcodec_sources = [
+   'gstspacemitplugin.c',
+ ]
+ 
+-spacemitmpp_dep = dependency('spacemit_mpp', version : '>= 0.0.0', required : false)
++spacemitmpp_dep = dependency('spacemit_mpp', version : '>= 0.0.0', required : get_option('spacemitcodec'))
+ 
+ if spacemitmpp_dep.found()
+ 	gstspacemitcodec = library('gstspacemitcodec',
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.c b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+index 2384fb9..eafb476 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.c
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+@@ -322,6 +322,7 @@ gst_spacemitsrc_set_property (GObject * object, guint property_id,
+   GstSpacemitSrc *src;
+ 
+   src = GST_SPACEMIT_SRC (object);
++  GST_INFO_OBJECT (src, "in set property :%d", property_id);
+ 
+   switch (property_id) {
+     case PROP_LOCATION:
+@@ -380,6 +381,7 @@ gst_spacemitsrc_get_property (GObject * object, guint property_id,
+ 
+   g_return_if_fail (GST_IS_SPACEMIT_SRC (object));
+   src = GST_SPACEMIT_SRC (object);
++  GST_INFO_OBJECT (src, "in get property :%d", property_id);
+ 
+   switch (property_id) {
+     case PROP_LOCATION:
+diff --git a/ext/spacemit/spacemitsrc/meson.build b/ext/spacemit/spacemitsrc/meson.build
+index bfa0b49..85040a7 100755
+--- a/ext/spacemit/spacemitsrc/meson.build
++++ b/ext/spacemit/spacemitsrc/meson.build
+@@ -3,7 +3,7 @@ spacemitsrc_sources = [
+   'gstspmsrcallocator.c',
+ ]
+ 
+-spacemitcam_dep = dependency('k1x-cam', version : '>= 0.0.0', required : false)
++spacemitcam_dep = dependency('k1x-cam', version : '>= 0.0.0', required : get_option('spacemitsrc'))
+ 
+ gstspacemitsrc = library('gstspacemitsrc',
+ 	spacemitsrc_sources,
+diff --git a/meson_options.txt b/meson_options.txt
+index 3131929..e2e689f 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -184,7 +184,8 @@ option('wpe', type : 'feature', value : 'auto', description : 'WPE Web browser p
+ option('magicleap', type : 'feature', value : 'auto', description : 'Magic Leap platform support')
+ option('v4l2codecs', type : 'feature', value : 'auto', description : 'Video4Linux Stateless CODECs support')
+ option('isac', type : 'feature', value : 'auto', description : 'iSAC plugin')
+-option('spacemit', type : 'feature', value : 'auto', description : 'Spacemit encoder/decoder plugin')
++option('spacemitcodec', type : 'feature', value : 'auto', description : 'Spacemit encoder/decoder plugin')
++option('spacemitsrc', type : 'feature', value : 'auto', description : 'Spacemit source plugin')
+ 
+ # HLS plugin options
+ option('hls', type : 'feature', value : 'auto', description : 'HTTP Live Streaming plugin')

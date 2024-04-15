@@ -1,0 +1,474 @@
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitallocator.c b/ext/spacemit/spacemitcodec/gstspacemitallocator.c
+index abb2b84..a677114 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitallocator.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitallocator.c
+@@ -112,7 +112,7 @@ static void
+ gst_spacemit_allocator_finalize (GObject * obj)
+ {
+   GstSpaceMitAllocator *alloc = GST_SPACEMIT_ALLOCATOR (obj);
+-  GST_DEBUG_OBJECT (alloc, "ZRong ------------------- spacemit allocator finalize");
++  GST_DEBUG_OBJECT (alloc, "start allocator finalize, refcount:%d", GST_OBJECT_REFCOUNT_VALUE(alloc));
+ 
+   G_OBJECT_CLASS (parent_class)->finalize (obj);
+ }
+@@ -147,7 +147,7 @@ gst_spacemit_allocator_memory_dispose (GstMemory * base_mem)
+ 
+     /* keep the memory alive */
+     gst_memory_ref (base_mem);
+-    GST_DEBUG ("memory dispose success, mem %p fd:(%d, %d), id:%d, base_mem:%p, ref:%d",
++    GST_DEBUG ("memory dispose success, mem %p fd:(%d, %d), id:%d, base_mem:%p, refcount:%d",
+         mem, mem->fd, fd, mem->mppframe_id, base_mem, base_mem->mini_object.refcount);
+ 
+     mem->acquired = FALSE;
+@@ -340,7 +340,7 @@ gst_spacemit_allocator_set_active (GstSpaceMitAllocator * allocator, gboolean ac
+   if (allocator->active != active)
+     changed = TRUE;
+ 
+-  GST_DEBUG_OBJECT (allocator, "allocator set active/deactice paras, cur:%d, set:%d", allocator->active, active);
++  GST_DEBUG_OBJECT (allocator, "start allocator set active, cur:%d, set:%d", allocator->active, active);
+ 
+   if (changed) {
+     if (active) {
+@@ -350,7 +350,7 @@ gst_spacemit_allocator_set_active (GstSpaceMitAllocator * allocator, gboolean ac
+       g_hash_table_foreach (allocator->memories, gst_unref_spacemit_mem, NULL);
+       g_hash_table_remove_all (allocator->memories);
+       if (allocator->foreign_allocator) {
+-        GST_DEBUG_OBJECT (allocator, "ZRong ------------------- allocator unref(%d %d) (%d %d)",
++        GST_DEBUG_OBJECT (allocator, "allocator refcount (%d %d) (%d %d)",
+             GST_OBJECT_REFCOUNT_VALUE(allocator->foreign_allocator), GST_OBJECT_REFCOUNT(allocator->foreign_allocator),
+             GST_OBJECT_REFCOUNT_VALUE(allocator), GST_OBJECT_REFCOUNT(allocator));
+         g_object_unref (allocator->foreign_allocator);
+@@ -361,7 +361,7 @@ gst_spacemit_allocator_set_active (GstSpaceMitAllocator * allocator, gboolean ac
+ 
+   allocator->active = active;
+   g_mutex_unlock (&allocator->lock);
+-  GST_DEBUG_OBJECT (allocator, "allocator set active/deactice finish");
++  GST_DEBUG_OBJECT (allocator, "finish allocator set active");
+ 
+   return changed;
+ }
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c b/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c
+index cd186ab..771afe2 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c
+@@ -41,7 +41,7 @@ static void gst_spacemit_buffer_pool_finalize (GObject * object);
+ 
+ G_DEFINE_TYPE_WITH_CODE (GstSpaceMitBufferPool, gst_spacemit_buffer_pool,
+     GST_TYPE_BUFFER_POOL,
+-    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "SpaceMitbufferpool", 0,
++    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitbufferpool", 0,
+         "spacemit buffer pool"));
+ 
+ static gboolean
+@@ -301,11 +301,11 @@ static void
+ gst_spacemit_buffer_pool_finalize (GObject * object)
+ {
+   GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL (object);
+-  GST_DEBUG ("ZRong  ------------------------af pool finalize.");
++  GST_DEBUG_OBJECT (pool, "start pool finalize.");
+ 
+   if (pool->allocator) {
+-    GST_DEBUG ("ZRong ------------------- af pool finalize (%d %d)",
+-        GST_OBJECT_REFCOUNT_VALUE(pool->allocator), GST_OBJECT_REFCOUNT(pool->allocator));
++    GST_DEBUG_OBJECT (pool, "pool allocator refcount: (%d %d)",
++      GST_OBJECT_REFCOUNT_VALUE(pool->allocator), GST_OBJECT_REFCOUNT(pool->allocator));
+ 
+     gst_object_unref (pool->allocator);
+   }
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.c b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+index 48b5b7f..8c170e5 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+@@ -154,26 +154,26 @@ done:
+ static gboolean gst_spacemitdec_close(GstVideoDecoder * decoder)
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
++  GST_DEBUG_OBJECT (decoder, "start close");
+ 
+   if (thiz->input_state)
+   {
+     gst_video_codec_state_unref (thiz->input_state);
+     thiz->input_state = NULL;
+   }
+-  GST_DEBUG_OBJECT (decoder, "ZRong --------------- spacemitdec start close");
++
+   if (thiz->pool) {
++    GST_DEBUG_OBJECT (decoder, "start pool set active: false(%d, %d)",
++      GST_MINI_OBJECT_REFCOUNT_VALUE(thiz->pool),
++      GST_MINI_OBJECT_REFCOUNT_VALUE(GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator));
++
+     gst_buffer_pool_set_active (thiz->pool, FALSE);
+-//    gst_spacemit_allocator_wait_inactive (GST_SPACEMIT_BUFFER_POOL_CAST(spacemitdec->pool)->allocator);
++    gst_spacemit_allocator_wait_inactive (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator);
+     gst_object_unref (thiz->pool);
+     thiz->pool = NULL;
+   }
+-  GST_DEBUG_OBJECT (decoder, "ZRong --------------- spacemitdec start close222");
+-
+-//  FRAME_Destory(spacemitdec->mppframe);
+-  PACKET_Destory (thiz->mpppacket);
+-  VDEC_DestoryChannel (thiz->ctx);  
+ 
+-  GST_DEBUG_OBJECT (decoder, "ZRong --------------- spacemitdec finish close");
++  GST_DEBUG_OBJECT (decoder, "finish close");
+ 
+ 	return TRUE;
+ }
+@@ -263,7 +263,7 @@ gst_spacemitdec_set_property (GObject * object, guint property_id,
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC (object);
+ 
+-  GST_DEBUG_OBJECT (thiz, "ZRong ------------------- set_property: %d", property_id);
++  GST_DEBUG_OBJECT (thiz, "set property: %d", property_id);
+ 
+   switch (property_id) {
+     case PROP_CODE_TYPE:
+@@ -293,7 +293,7 @@ gst_spacemitdec_get_property (GObject * object, guint property_id,
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC (object);
+ 
+-  GST_DEBUG_OBJECT (thiz, "ZRong ------------------- get_property: %d", property_id);
++  GST_DEBUG_OBJECT (thiz, "get property: %d", property_id);
+ 
+   switch (property_id) {
+     case PROP_CODE_TYPE:
+@@ -372,6 +372,9 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
++
++  GST_DEBUG_OBJECT (thiz, "start finish stop");
++
+   if (thiz->save_dec)
+     fclose(thiz->fb);
+ 
+@@ -379,13 +382,19 @@ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+   thiz->parse_resync = FALSE;
+   thiz->saw_header = FALSE;
+ 
++  VDEC_DestoryChannel (thiz->ctx);
++  thiz->ctx = NULL;
++
++  PACKET_Destory(thiz->mpppacket);
++  thiz->mpppacket = NULL;
++
+   if (!(gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED)) {
+-    GST_DEBUG_OBJECT (thiz, "ZRong --------------- spacemitdec finish stop");
++    GST_DEBUG_OBJECT (thiz, "finish stop");
+     return TRUE;
+   }
+ 
+   gst_pad_stop_task (decoder->srcpad);
+-  GST_DEBUG_OBJECT (thiz, "ZRong --------------- spacemitdec finish stop222");
++  GST_DEBUG_OBJECT (thiz, "finish stop222");
+ 
+ 	return TRUE;
+ }
+@@ -398,6 +407,26 @@ gst_change_mpp_ecoding_type (GstStructure * s)
+   if (gst_structure_has_name (s, "video/x-h265"))
+     return CODING_H265;
+ 
++  if (gst_structure_has_name (s, "video/mpeg")) {
++      const GValue *value;
++
++      value = gst_structure_get_value (s, "mpegversion");
++      if (!value || !G_VALUE_HOLDS_INT (value)) {
++        GST_ERROR ("Failed to get mpegversion");
++        return CODING_UNKNOWN;
++      }
++      if (g_value_get_int (value) == 4)
++        return CODING_MPEG4;
++      else if (g_value_get_int (value) == 2)
++        return CODING_MPEG2;
++      else if (g_value_get_int (value) == 1) {
++        GST_ERROR ("no support now!!!");
++        return CODING_MPEG1;
++      } else {
++        return CODING_UNKNOWN;
++      }
++  }
++
+   if (gst_structure_has_name (s, "image/jpeg"))
+     return CODING_MJPEG;
+ 
+@@ -442,6 +471,7 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+     thiz->ctx->stVdecPara.nRotateDegree = 0;
+     thiz->ctx->stVdecPara.bThumbnailMode = 0;
+     thiz->ctx->stVdecPara.bIsInterlaced = MPP_FALSE;
++    thiz->ctx->stVdecPara.eFrameBufferType = MPP_FRAME_BUFFERTYPE_DMABUF_INTERNAL;
+ 
+     thiz->ctx->stVdecPara.bInputBlockModeEnable = MPP_TRUE;
+     thiz->ctx->stVdecPara.bOutputBlockModeEnable = MPP_TRUE;
+@@ -511,7 +541,7 @@ gst_spacemitdec_flush (GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+ 
+-  GST_DEBUG_OBJECT (thiz, "ZRong -------------------- flushing start, (%d)", thiz->downstream_flow_ret);
++  GST_DEBUG_OBJECT (thiz, "start flush, (%d)", thiz->downstream_flow_ret);
+ 
+   thiz->flushing = TRUE;
+ 
+@@ -544,7 +574,7 @@ gst_spacemitdec_flush (GstVideoDecoder * decoder)
+   thiz->flushing = FALSE;
+   thiz->downstream_flow_ret = GST_FLOW_OK;
+   
+-  GST_DEBUG_OBJECT (thiz, "ZRong -------------------- flushing stop");
++  GST_DEBUG_OBJECT (thiz, "finish flush");
+ 
+ 	return TRUE;
+ }
+@@ -715,7 +745,7 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+   } while (thiz->req_nonblock);
+ 
+   if (ret == MPP_CODER_EOS)
+-    FRAME_SetEos (mppframe, TRUE);
++    FRAME_SetEos (mppframe, FRAME_EOS_WITH_DATA);
+ 
+   count = 0;
+   thiz->mppframe = mppframe;
+@@ -788,7 +818,7 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+         frame, frame->system_frame_number, GST_TIME_ARGS (GST_BUFFER_PTS (frame->input_buffer)),
+         GST_TIME_ARGS (GST_BUFFER_DTS (frame->input_buffer)), GST_TIME_ARGS (FRAME_GetPts(thiz->mppframe)));
+ 
+-    //frame->pts = FRAME_GetPts(thiz->mppframe);
++    // frame->pts = FRAME_GetPts(thiz->mppframe);
+     // frame->pts = GST_CLOCK_TIME_NONE;
+     // frame->dts = FRAME_GetPts(thiz->mppframe);
+     flow_status = gst_spacemitdec_fill_output_buffer (decoder, &frame->output_buffer);
+@@ -832,6 +862,7 @@ done:
+ 
+ flushing:
+ {
++  thiz->flushing = TRUE;
+   thiz->downstream_flow_ret = GST_FLOW_FLUSHING;
+ 
+   while (1) {
+@@ -884,7 +915,7 @@ gst_spacemitdec_pool_set_active(GstVideoDecoder * decoder)
+   GstCaps *caps = NULL;
+   GstVideoInfo vinfo;
+ 
+-  GST_ERROR_OBJECT (thiz, "@@@ ZRong ------------------------- start pool_set_active!");
++  GST_ERROR_OBJECT (thiz, "start spacemitdec pool set active!");
+ 
+   pool = gst_video_decoder_get_buffer_pool (GST_VIDEO_DECODER (thiz));
+   if (pool) {
+@@ -895,6 +926,7 @@ gst_spacemitdec_pool_set_active(GstVideoDecoder * decoder)
+       return FALSE;
+     }
+     gst_structure_free (config);
++    gst_object_unref (pool);
+   }
+ 
+   if (caps) {
+@@ -934,6 +966,8 @@ gst_spacemitdec_pool_set_active(GstVideoDecoder * decoder)
+     return FALSE;
+   }
+ 
++  GST_DEBUG_OBJECT (thiz, "finish spacemitdec pool set active, ref count: %d", GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
++
+   return TRUE;
+ }
+ 
+@@ -1078,8 +1112,7 @@ gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
+     if (!gst_spacemitdec_set_src_caps (thiz))
+       goto not_negotiated_err;
+ 
+-    GST_DEBUG_OBJECT (thiz, "start negotiate, %d, %d, %d",
+-      actual_width, actual_height, thiz->eOutputPixelFormat);
++    GST_DEBUG_OBJECT (thiz, "start negotiate, (%d, %d, %d)", actual_width, actual_height, thiz->eOutputPixelFormat);
+ 
+     if (!gst_video_decoder_negotiate (decoder))
+       goto not_negotiated_err;
+@@ -1088,13 +1121,14 @@ gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
+       goto acitve_fail;
+   }
+ 
+-  if (G_UNLIKELY (!gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED)) {
++  if (G_UNLIKELY (!gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED) && !thiz->flushing) {
+     GST_DEBUG_OBJECT (thiz, "start dec thread");
+     gst_pad_start_task (decoder->srcpad,
+         (GstTaskFunction) gst_spacemitdec_loop, decoder, NULL);
+   }
+ 
+-  GST_DEBUG_OBJECT (thiz, "finish dec handle, %d", thiz->downstream_flow_ret);
++  GST_DEBUG_OBJECT (thiz, "finish dec handle, %d, pool refcount:%d",
++    thiz->downstream_flow_ret, GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
+   ret = thiz->downstream_flow_ret;
+ 
+ out:
+@@ -1461,8 +1495,11 @@ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder * decoder, Gst
+   GstCaps *caps = NULL;
+   GstVideoInfo vinfo;
+   GstVideoCodecState *output_state;
++  guint num_buffers;
++  GstAllocationParams params;
++  GstAllocator *allocator = NULL;
+ 
+-  GST_DEBUG_OBJECT (thiz, "@@@ ZRong ------------------------- in decide_allocation!");
++  GST_DEBUG_OBJECT (thiz, "start decide_allocation!, query: %" GST_PTR_FORMAT, query);
+ 
+   if (!GST_VIDEO_DECODER_CLASS(gst_spacemitdec_parent_class)->decide_allocation(decoder, query))
+     return FALSE;
+@@ -1471,34 +1508,72 @@ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder * decoder, Gst
+      class ensures that there will always be at least a 0th pool in
+      the query. */
+   gst_query_parse_nth_allocation_pool(query, 0, &pool, &size, &min, &max);
+-  pool_config = gst_buffer_pool_get_config(pool);
+-  gst_buffer_pool_config_get_params (pool_config, &caps, &size,
+-      &min, &max);
++  pool_config = gst_buffer_pool_get_config (pool);
++  gst_buffer_pool_config_get_params (pool_config, &caps, &size, &min, &max);
++
++  GST_DEBUG_OBJECT (thiz, "upstream provides the pool is: %" GST_PTR_FORMAT "pool caps: %" GST_PTR_FORMAT, pool, caps);
++
++  gst_object_unref (pool);
+ 
+-  GST_DEBUG_OBJECT (thiz, "get pool caps: %" GST_PTR_FORMAT, caps);
+   if (_gst_caps_has_feature (caps, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+-    GST_INFO_OBJECT (thiz, "the spacemit decoder uses DMABuf memory");
++    // GST_INFO_OBJECT (thiz, "the spacemit decoder uses DMABuf memory");
+     thiz->use_dmabuf = TRUE;
+   } else {
+     thiz->use_dmabuf = FALSE;
+   }
+ 
++  i = 0;
++  while (gst_query_get_n_allocation_pools (query) > 0) {
++    gst_query_parse_nth_allocation_pool (query, 0, &pool, &size, &min, &max);
++    GST_DEBUG_OBJECT (thiz, "%dth pool is %" GST_PTR_FORMAT, i, pool);
++
++    gst_query_remove_nth_allocation_pool (query, 0);
++    if (pool)
++      gst_object_unref (pool);
++    pool = NULL;
++    i++;
++  }
++
++  i = 0;
++  while (gst_query_get_n_allocation_params (query) > 0) {
++    gst_query_parse_nth_allocation_param (query, 0, &allocator, &params);
++    GST_DEBUG_OBJECT (thiz, "%dth allocator is %" GST_PTR_FORMAT, i, allocator);
++
++    gst_query_remove_nth_allocation_param (query, 0);
++    if (allocator)
++      gst_object_unref (allocator);
++    allocator = NULL;
++    i++;
++  }
++
+   /* Decoder always use its own pool. */
+   if (!thiz->pool) {
+     output_state = gst_video_decoder_get_output_state (GST_VIDEO_DECODER (thiz));
+ 
+     gst_clear_object (&thiz->pool);
+-    GST_INFO_OBJECT (thiz, "create new spacemit bufferpool");
+-    thiz->pool =
+-      gst_spacemitdec_create_buffer_pool(thiz, &output_state->info, (8 > min) ? 8 : min);
++    num_buffers = (8 > min) ? 8 : min;
++    GST_INFO_OBJECT (thiz, "create new spacemit bufferpool, DMABUF memory: %d, num: %d", thiz->use_dmabuf, num_buffers);
++    thiz->pool = gst_spacemitdec_create_buffer_pool(thiz, &output_state->info, num_buffers);
+     gst_video_codec_state_unref (output_state);
+     if (!thiz->pool) {
+       GST_ERROR_OBJECT (thiz, "failed to create new pool");
+       goto failed_to_create_pool;
+     }
++
++    gst_buffer_pool_config_set_params (pool_config, caps, size, num_buffers, num_buffers);
++    gst_buffer_pool_config_set_allocator (pool_config, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
++    gst_query_add_allocation_param (query, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
++    gst_query_add_allocation_pool (query, thiz->pool, size, num_buffers, num_buffers);
++  } else {
++    gst_buffer_pool_config_set_params (pool_config, caps, size, num_buffers, num_buffers);
++    gst_buffer_pool_config_set_allocator (pool_config, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
++    gst_query_add_allocation_param (query, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
++    gst_query_add_allocation_pool (query, thiz->pool, size, num_buffers, num_buffers);
++    // goto no_support;
++    GST_WARNING_OBJECT (thiz, "spacemit pool had setup!");
+   }
+-  GST_DEBUG_OBJECT (thiz,
+-      "upstream provides the pool is: %" GST_PTR_FORMAT, pool);
++
++  GST_DEBUG_OBJECT (thiz, "finish decide_allocation, spacemit pool ref:%d", GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
+ 
+   /* If downstream supports video meta and video alignment,
+    * we can replace with our own spacemit bufferpool and use it
+@@ -1527,22 +1602,16 @@ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder * decoder, Gst
+     goto no_support;
+   }
+ #endif
+-  if (pool)
+-    gst_object_unref (pool);
+ 
+ 	return TRUE;
+ 
+ failed_to_create_pool:
+   GST_ERROR_OBJECT (thiz, "failed to set buffer pool config");
+-  if (pool)
+-    gst_object_unref (pool);
+   return FALSE;
+ 
+ no_support:
+   GST_ERROR_OBJECT (thiz,
+       "error! upstream provides the strange pool: %" GST_PTR_FORMAT, pool);
+-  if (pool)
+-    gst_object_unref (pool);
+   return FALSE;
+ }
+ 
+@@ -1550,7 +1619,7 @@ static GstStateChangeReturn
+ gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transition)
+ {
+   GstVideoDecoder *decoder = GST_VIDEO_DECODER (element);
+-	GST_DEBUG("ZRong ------------------ in change state, %x", transition);
++  GST_DEBUG_OBJECT (decoder, "start change state, %x", transition);
+ 
+   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+     GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitenc.c b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+index ba9ab6a..2070c8b 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitenc.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+@@ -944,7 +944,7 @@ gst_spacemitenc_handle_frame (GstVideoEncoder * encoder,
+ 
+   if (frame) {
+     thiz->frame_count++;
+-    FRAME_SetEos(thiz->mppframe, 0);
++    FRAME_SetEos(thiz->mppframe, FRAME_NO_EOS);
+ 
+     gst_video_frame_map (&video_frame, &thiz->input_state->info, frame->input_buffer, GST_MAP_READ);
+     if (thiz->PixelFormat == PIXEL_FORMAT_I420) {
+@@ -981,7 +981,7 @@ gst_spacemitenc_handle_frame (GstVideoEncoder * encoder,
+     FRAME_SetPts(mppframe, GST_BUFFER_PTS (frame->input_buffer));
+   } else {
+     GST_DEBUG_OBJECT (thiz, "null frame enc, need eos");
+-    FRAME_SetEos(thiz->mppframe, 1);
++    FRAME_SetEos(thiz->mppframe, FRAME_EOS_WITHOUT_DATA);
+     mppframe = thiz->mppframe;
+   }
+ 
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.c b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+index eafb476..8a973a5 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.c
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+@@ -491,7 +491,7 @@ video_frame_release (void *data)
+       GST_DEBUG_OBJECT (frame->src, "release cpp output buffer %p, the gstbuffer is %p, pushed frame: %u", outputBuf, frame->gstbuf, frame->src->pushed_frame);
+       g_mutex_unlock(&frame->src->mutex);
+ 
+-      GST_DEBUG_OBJECT (frame->src, "video_frame dur is: %, fd: %d" GST_TIME_FORMAT, GST_TIME_ARGS (GST_CLOCK_DIFF (frame->use_dur, gst_clock_get_time (clock))), outputBuf->m.fd);
++      GST_DEBUG_OBJECT (frame->src, "video_frame dur is: %" GST_TIME_FORMAT, GST_TIME_ARGS (GST_CLOCK_DIFF (frame->use_dur, gst_clock_get_time (clock))), ", fd: %d", outputBuf->m.fd);
+       gst_object_unref (clock);
+ 
+       gst_release_cpp_buffer(outputBuf, frame->index);
+diff --git a/gst-libs/gst/wayland/gstwllinuxdmabuf.c b/gst-libs/gst/wayland/gstwllinuxdmabuf.c
+index d6ee6ec..c591742 100644
+--- a/gst-libs/gst/wayland/gstwllinuxdmabuf.c
++++ b/gst-libs/gst/wayland/gstwllinuxdmabuf.c
+@@ -152,7 +152,7 @@ gst_wl_linux_dmabuf_construct_wl_buffer (GstBuffer * buf,
+   /* Wait for the request answer */
+   wl_display_flush (gst_wl_display_get_display (display));
+   data.wbuf = (gpointer) 0x1;
+-  timeout = g_get_monotonic_time () + G_TIME_SPAN_SECOND;
++  timeout = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+   while (data.wbuf == (gpointer) 0x1) {
+     if (!g_cond_wait_until (&data.cond, &data.lock, timeout)) {
+       GST_ERROR_OBJECT (mem->allocator, "zwp_linux_buffer_params_v1 time out");

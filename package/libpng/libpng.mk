@@ -22,6 +22,11 @@ else
 LIBPNG_CONF_OPTS += --disable-arm-neon
 endif
 
+ifeq ($(BR2_RISCV_64),y)
+LIBPNG_CONF_OPTS += --enable-riscv-vector
+LIBPNG_CONF_OPTS += CFLAGS="-march=rv64gcv"
+endif
+
 ifeq ($(BR2_X86_CPU_HAS_SSE2),y)
 LIBPNG_CONF_OPTS += --enable-intel-sse
 else

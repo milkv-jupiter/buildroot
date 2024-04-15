@@ -73,7 +73,8 @@ GST1_PLUGINS_BAD_CONF_OPTS += \
 	-Dmagicleap=disabled \
 	-Disac=disabled \
 	-Diqa=disabled \
-	-Dopencv=disabled
+	-Dopencv=disabled \
+	-Dtinyalsa=disabled
 
 GST1_PLUGINS_BAD_DEPENDENCIES = gst1-plugins-base gstreamer1
 
@@ -816,6 +817,28 @@ GST1_PLUGINS_BAD_CONF_OPTS += -Dzxing=enabled
 GST1_PLUGINS_BAD_DEPENDENCIES += zxing-cpp
 else
 GST1_PLUGINS_BAD_CONF_OPTS += -Dzxing=disabled
+endif
+
+ifeq ($(BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_SPACEMITCODEC)_$(BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_SPACEMITSRC), y_y)
+#$(info  "open spacemit codec and src")
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitcodec=enabled
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitsrc=enabled
+GST1_PLUGINS_BAD_DEPENDENCIES += mpp
+GST1_PLUGINS_BAD_DEPENDENCIES += k1x-cam
+else ifeq ($(BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_SPACEMITCODEC),y)
+#$(info  "only open spacemit codec")
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitcodec=enabled
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitsrc=disabled
+GST1_PLUGINS_BAD_DEPENDENCIES += mpp
+else ifeq ($(BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_SPACEMITSRC),y)
+#$(info  "only open spacemit src")
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitcodec=disabled
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitsrc=enabled
+GST1_PLUGINS_BAD_DEPENDENCIES += k1x-cam
+else
+#$(info  "none open spacemit codec or src")
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitcodec=disabled
+GST1_PLUGINS_BAD_CONF_OPTS += -Dspacemitsrc=disabled
 endif
 
 # Add GPL license if GPL licensed plugins enabled.

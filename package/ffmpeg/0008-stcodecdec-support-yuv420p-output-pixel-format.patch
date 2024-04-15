@@ -1,0 +1,125 @@
+From 217da28a3f91ae8e360d2da836519001488d143b Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Fri, 29 Mar 2024 09:39:01 +0800
+Subject: [PATCH] stcodecdec support yuv420p output pixel format
+
+---
+ libavcodec/stcodecdec.c | 54 ++++++++++++++++++++++++++---------------
+ 1 file changed, 34 insertions(+), 20 deletions(-)
+
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+index cf88096..66b1305 100755
+--- a/libavcodec/stcodecdec.c
++++ b/libavcodec/stcodecdec.c
+@@ -70,6 +70,19 @@ typedef struct {
+   AVBufferRef* decoder_ref;
+ } STCODECFrameContext;
+ 
++static MppPixelFormat stcodec_get_pixelformat(AVCodecContext* avctx) {
++  switch (avctx->pix_fmt) {
++    case AV_PIX_FMT_NV12:
++      return PIXEL_FORMAT_NV12;
++    case AV_PIX_FMT_YUV420P:
++      return PIXEL_FORMAT_I420;
++    case AV_PIX_FMT_DRM_PRIME:
++      return PIXEL_FORMAT_NV12;
++    default:
++      return PIXEL_FORMAT_UNKNOWN;
++  }
++}
++
+ static MppCodingType stcodec_get_codingtype(AVCodecContext* avctx) {
+   switch (avctx->codec_id) {
+     case AV_CODEC_ID_H264:
+@@ -299,7 +312,7 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   decoder->pVdecCtx->stVdecPara.nWidth = avctx->width;
+   decoder->pVdecCtx->stVdecPara.nHeight = avctx->height;
+   decoder->pVdecCtx->stVdecPara.nStride = get_stride(avctx->width, 8);
+-  decoder->pVdecCtx->stVdecPara.eOutputPixelFormat = PIXEL_FORMAT_NV12;
++  decoder->pVdecCtx->stVdecPara.eOutputPixelFormat = stcodec_get_pixelformat(avctx);
+   decoder->pVdecCtx->eCodecType = CODEC_V4L2_LINLONV5V7;
+   if (avctx->width >= 3840 || avctx->height >= 2160) {
+     av_log(avctx, AV_LOG_ERROR, "4K video, downscale!\n");
+@@ -413,18 +426,10 @@ static int stcodec_send_packet(AVCodecContext* avctx, const AVPacket* avpkt) {
+   // on first packet, send extradata
+   if (decoder->first_packet) {
+     if (avctx->extradata_size) {
+-      if (avctx->codec_id == AV_CODEC_ID_H264) {
+-        ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
+-                                           avctx->extradata_size, avpkt->pts,
+-                                           avpkt->dts, avpkt->duration);
+-      } else if (avctx->codec_id == AV_CODEC_ID_HEVC) {
+-        ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
+-                                           avctx->extradata_size, avpkt->pts,
+-                                           avpkt->dts, avpkt->duration);
+-      } else if (avctx->codec_id == AV_CODEC_ID_MJPEG) {
+-        // do nothing.
+-      } else if (avctx->codec_id == AV_CODEC_ID_MPEG4 ||
+-                 avctx->codec_id == AV_CODEC_ID_VC1) {
++      if (avctx->codec_id == AV_CODEC_ID_H264 ||
++          avctx->codec_id == AV_CODEC_ID_HEVC ||
++          avctx->codec_id == AV_CODEC_ID_MPEG4 ||
++          avctx->codec_id == AV_CODEC_ID_VC1) {
+         ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
+                                            avctx->extradata_size, avpkt->pts,
+                                            avpkt->dts, avpkt->duration);
+@@ -499,7 +504,7 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+     freeslots = decoder->pVdecPara->nInputQueueLeftNum;
+     av_log(avctx, AV_LOG_DEBUG, "Input queue left %d seat!!\n", freeslots);
+ 
+-    while (freeslots > 0) {
++    if (freeslots > 0) {
+       ret = ff_decode_get_packet(avctx, &pkt);
+       if (ret < 0 && ret != AVERROR_EOF) {
+         av_log(avctx, AV_LOG_DEBUG,
+@@ -517,11 +522,6 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+                av_err2str(ret));
+         goto fail;
+       }
+-
+-      // make sure we keep decoder full
+-      VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
+-      freeslots = decoder->pVdecPara->nInputQueueLeftNum;
+-      av_log(avctx, AV_LOG_DEBUG, "Input queue left %d seat!!\n", freeslots);
+     }
+   }
+ 
+@@ -666,6 +666,17 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+         frame->linesize[1] = get_stride(avctx->width, 8);
+         frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
+         frame->data[1] = frame->data[0] + frame->width * frame->height;
++        frame->buf[0] = av_buffer_create(
++            (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
++            stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
++      } else if (avctx->pix_fmt == AV_PIX_FMT_YUV420P) {
++        frame->linesize[0] = get_stride(avctx->width, 8);
++        frame->linesize[1] = get_stride(avctx->width, 8) / 2;
++        frame->linesize[2] = get_stride(avctx->width, 8) / 2;
++        frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
++        frame->data[1] = FRAME_GetDataPointer(mppframe, 1);
++        frame->data[2] = FRAME_GetDataPointer(mppframe, 2);
++
+         frame->buf[0] = av_buffer_create(
+             (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
+             stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
+@@ -763,7 +774,7 @@ static const AVCodecHWConfigInternal* const stcodec_hw_configs[] = {
+                         AV_CODEC_CAP_HARDWARE,                                \
+       .pix_fmts =                                                           \
+           (const enum AVPixelFormat[]){AV_PIX_FMT_DRM_PRIME, AV_PIX_FMT_NV12, \
+-                                       AV_PIX_FMT_NONE},                      \
++                                       AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE},   \
+       .hw_configs = stcodec_hw_configs,                                       \
+       .bsfs = BSFS,                                                           \
+       .wrapper_name = "stcodec",                                            \
+@@ -771,4 +782,7 @@ static const AVCodecHWConfigInternal* const stcodec_hw_configs[] = {
+ 
+ STCODEC_DEC(h264, AV_CODEC_ID_H264, "h264_mp4toannexb")
+ STCODEC_DEC(hevc, AV_CODEC_ID_HEVC, "hevc_mp4toannexb")
++STCODEC_DEC(vp8, AV_CODEC_ID_VP8, NULL)
++STCODEC_DEC(vp9, AV_CODEC_ID_VP9, NULL)
+ STCODEC_DEC(mjpeg, AV_CODEC_ID_MJPEG, NULL)
++STCODEC_DEC(mpeg4, AV_CODEC_ID_MPEG4, NULL)
+\ No newline at end of file
+-- 
+2.25.1
+

@@ -1,0 +1,703 @@
+From 573266fb7c6d3747556269aadb66905cab788fcd Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Tue, 12 Mar 2024 08:56:22 +0800
+Subject: [PATCH] update version: fix some bugs
+
+---
+ libavcodec/stcodecdec.c | 477 +++++++++++++++++++++++++++++-----------
+ 1 file changed, 346 insertions(+), 131 deletions(-)
+
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+index 763e1b2..1d618b9 100755
+--- a/libavcodec/stcodecdec.c
++++ b/libavcodec/stcodecdec.c
+@@ -39,7 +39,8 @@
+ #include "libavutil/log.h"
+ #include "vdec.h"
+ 
+-#define PACKET_SIZE (2 * 1024 * 1024)
++#define FREESLOTS_THRESHOLD 4
++#define DROPFRAME_NUM_AFTER_FLUSH 1
+ 
+ typedef struct {
+   MppVdecCtx* pVdecCtx;
+@@ -49,6 +50,11 @@ typedef struct {
+   enum AVPixelFormat ePixFmt;
+ 
+   char eos_reached;
++  char no_pts;
++  char first_packet;
++  int64_t duration;
++  int64_t use_dts;
++  char flushed;
+ 
+   AVBufferRef* frames_ref;
+   AVBufferRef* device_ref;
+@@ -76,17 +82,78 @@ static MppCodingType stcodec_get_codingtype(AVCodecContext* avctx) {
+       return CODING_VP9;
+     case AV_CODEC_ID_MJPEG:
+       return CODING_MJPEG;
++    case AV_CODEC_ID_VC1:
++      return CODING_VC1;
++    case AV_CODEC_ID_MPEG2VIDEO:
++      return CODING_MPEG2;
++    case AV_CODEC_ID_MPEG4:
++      return CODING_MPEG4;
++    case AV_CODEC_ID_AVS:
++      return CODING_AVS;
++    case AV_CODEC_ID_AVS2:
++      return CODING_AVS2;
+     default:
+       return CODING_UNKNOWN;
+   }
+ }
+ 
++static MppProfileType stcodec_get_profiletype(AVCodecContext* avctx) {
++  av_log(avctx, AV_LOG_DEBUG, "profile = %d\n", avctx->profile);
++  if (avctx->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
++    switch (avctx->profile) {
++      case FF_PROFILE_MPEG2_422:
++        return PROFILE_MPEG2_422;
++      case FF_PROFILE_MPEG2_HIGH:
++        return PROFILE_MPEG2_HIGH;
++      case FF_PROFILE_MPEG2_SNR_SCALABLE:
++        return PROFILE_MPEG2_SNR_SCALABLE;
++      case FF_PROFILE_MPEG2_MAIN:
++        return PROFILE_MPEG2_MAIN;
++      case FF_PROFILE_MPEG2_SIMPLE:
++        return PROFILE_MPEG2_SIMPLE;
++      default:
++        return PROFILE_UNKNOWN;
++    }
++  } else if (avctx->codec_id == AV_CODEC_ID_VC1) {
++    switch (avctx->profile) {
++      case FF_PROFILE_VC1_SIMPLE:
++        return PROFILE_VC1_SIMPLE;
++      case FF_PROFILE_VC1_MAIN:
++        return PROFILE_VC1_MAIN;
++      case FF_PROFILE_VC1_COMPLEX:
++        return PROFILE_VC1_COMPLEX;
++      case FF_PROFILE_VC1_ADVANCED:
++        return PROFILE_VC1_ADVANCED;
++      default:
++        return PROFILE_UNKNOWN;
++    }
++  } else if (avctx->codec_id == AV_CODEC_ID_MJPEG) {
++    switch (avctx->profile) {
++      case FF_PROFILE_MJPEG_HUFFMAN_BASELINE_DCT:
++        return PROFILE_MJPEG_HUFFMAN_BASELINE_DCT;
++      case FF_PROFILE_MJPEG_HUFFMAN_EXTENDED_SEQUENTIAL_DCT:
++        return PROFILE_MJPEG_HUFFMAN_EXTENDED_SEQUENTIAL_DCT;
++      case FF_PROFILE_MJPEG_HUFFMAN_PROGRESSIVE_DCT:
++        return PROFILE_MJPEG_HUFFMAN_PROGRESSIVE_DCT;
++      case FF_PROFILE_MJPEG_HUFFMAN_LOSSLESS:
++        return PROFILE_MJPEG_HUFFMAN_LOSSLESS;
++      case FF_PROFILE_MJPEG_JPEG_LS:
++        return PROFILE_MJPEG_JPEG_LS;
++      default:
++        return PROFILE_UNKNOWN;
++    }
++  } else {
++    return PROFILE_UNKNOWN;
++  }
++}
++
+ static int get_stride(int width, int align) {
+   return (width + align - 1) & (~(align - 1));
+ }
+ 
+ static int stcodec_send_data_to_decoder(AVCodecContext* avctx, uint8_t* buffer,
+-                                        int size, int64_t pts) {
++                                        int size, int64_t pts, int64_t dts,
++                                        int64_t duration) {
+   STCODECDecodeContext* st_context = avctx->priv_data;
+   STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
+   int ret = 0;
+@@ -102,7 +169,14 @@ static int stcodec_send_data_to_decoder(AVCodecContext* avctx, uint8_t* buffer,
+ 
+     PACKET_SetDataPointer(decoder->pPacket, buffer);
+     PACKET_SetLength(decoder->pPacket, size);
+-    PACKET_SetPts(decoder->pPacket, pts);
++    if (pts != AV_NOPTS_VALUE) {
++      PACKET_SetPts(decoder->pPacket, pts);
++    } else if (dts != AV_NOPTS_VALUE) {
++      PACKET_SetPts(decoder->pPacket, dts);
++      decoder->use_dts = 1;
++    } else {
++      decoder->no_pts = 1;
++    }
+     PACKET_SetEos(decoder->pPacket, 0);
+     av_log(avctx, AV_LOG_DEBUG, "input pts : %ld\n", pts);
+   }
+@@ -135,12 +209,24 @@ static int stcodec_close_decoder(AVCodecContext* avctx) {
+ 
+ static void stcodec_release_stcodec_decoder(void* opaque, uint8_t* data) {
+   STCODECDecoder* decoder = (STCODECDecoder*)data;
++
++  if (decoder->pPacket) {
++    // PACKET_Free(decoder->pPacket);
++    PACKET_Destory(decoder->pPacket);
++    decoder->pPacket = NULL;
++  }
++
++  if (decoder->pFrame) {
++    FRAME_Destory(decoder->pFrame);
++    decoder->pFrame = NULL;
++  }
++
+   if (decoder->pVdecCtx) {
+-    av_log(NULL, AV_LOG_ERROR, "stcodec release decoder\n");
+-    VDEC_ResetChannel(decoder->pVdecCtx);
++    // VDEC_ResetChannel(decoder->pVdecCtx);
+     VDEC_DestoryChannel(decoder->pVdecCtx);
+     decoder->pVdecCtx = NULL;
+   }
++
+   av_buffer_unref(&decoder->frames_ref);
+   av_buffer_unref(&decoder->device_ref);
+   av_free(decoder);
+@@ -151,9 +237,10 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   STCODECDecoder* decoder = NULL;
+   MppCodingType codectype = CODING_UNKNOWN;
+   int ret;
+-/*
+-  if (avctx->width > 4096 || avctx->height > 2160 || avctx->width <= 640 ||
+-      avctx->height <= 480) {
++
++  if ((avctx->width > 4096 || avctx->height > 2304 || avctx->width <= 640 ||
++       avctx->height <= 480) &&
++      (avctx->width != 0 || avctx->height != 0)) {
+     av_log(avctx, AV_LOG_ERROR,
+            "STCODEC Decoder do not support the size (%d x %d), too big or too "
+            "small!\n",
+@@ -161,9 +248,9 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+     ret = AVERROR_UNKNOWN;
+     goto fail;
+   }
+-*/
++
+   avctx->pix_fmt = ff_get_format(avctx, avctx->codec->pix_fmts);
+-  av_log(avctx, AV_LOG_ERROR, "------------------------ Use pixel format %d\n", avctx->pix_fmt);
++  av_log(avctx, AV_LOG_ERROR, "Use pixel format %d\n", avctx->pix_fmt);
+ 
+   // create a decoder and a ref to it
+   decoder = av_mallocz(sizeof(STCODECDecoder));
+@@ -206,6 +293,7 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+ 
+   // set para
+   decoder->pVdecCtx->stVdecPara.eCodingType = codectype;
++  decoder->pVdecCtx->stVdecPara.nProfile = stcodec_get_profiletype(avctx);
+   decoder->pVdecCtx->stVdecPara.bInputBlockModeEnable = MPP_FALSE;
+   decoder->pVdecCtx->stVdecPara.bOutputBlockModeEnable = MPP_TRUE;
+   decoder->pVdecCtx->stVdecPara.nWidth = avctx->width;
+@@ -213,7 +301,12 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   decoder->pVdecCtx->stVdecPara.nStride = get_stride(avctx->width, 8);
+   decoder->pVdecCtx->stVdecPara.eOutputPixelFormat = PIXEL_FORMAT_NV12;
+   decoder->pVdecCtx->eCodecType = CODEC_V4L2_LINLONV5V7;
+-  decoder->pVdecCtx->stVdecPara.nScale = 1;
++  if (avctx->width >= 3840 || avctx->height >= 2160) {
++    av_log(avctx, AV_LOG_ERROR, "4K video, downscale!\n");
++    decoder->pVdecCtx->stVdecPara.nScale = 2;
++  } else {
++    decoder->pVdecCtx->stVdecPara.nScale = 1;
++  }
+   decoder->pVdecCtx->stVdecPara.nHorizonScaleDownRatio = 1;
+   decoder->pVdecCtx->stVdecPara.nVerticalScaleDownRatio = 1;
+   decoder->pVdecCtx->stVdecPara.nRotateDegree = 0;
+@@ -225,37 +318,38 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   if (ret) {
+     av_log(avctx, AV_LOG_ERROR,
+            "Failed to initialize STCODEC VDEV (ret = %d).\n", ret);
+-    VDEC_DestoryChannel(decoder->pVdecCtx);
+-    av_free(decoder);
++    // VDEC_DestoryChannel(decoder->pVdecCtx);
++    // av_free(decoder);
+     ret = AVERROR_UNKNOWN;
+     goto fail;
+   }
+ 
+-  av_log(avctx, AV_LOG_ERROR, "init 1.\n");
+   // mpp packet init
+   decoder->pPacket = PACKET_Create();
+   if (!decoder->pPacket) {
+     av_log(avctx, AV_LOG_ERROR, "Failed to initialize STCODEC packet.\n");
+-    VDEC_DestoryChannel(decoder->pVdecCtx);
+-    av_free(decoder);
++    // VDEC_DestoryChannel(decoder->pVdecCtx);
++    // av_free(decoder);
+     ret = AVERROR_UNKNOWN;
+     goto fail;
+   }
+-  PACKET_Alloc(decoder->pPacket, PACKET_SIZE);
+ 
+-  av_log(avctx, AV_LOG_ERROR, "init 2.\n");
+   // mpp frame init
+   decoder->pFrame = FRAME_Create();
+   if (!decoder->pFrame) {
+     av_log(avctx, AV_LOG_ERROR, "Failed to initialize STCODEC frame.\n");
+     PACKET_Destory(decoder->pPacket);
+-    VDEC_DestoryChannel(decoder->pVdecCtx);
+-    av_free(decoder);
++    // VDEC_DestoryChannel(decoder->pVdecCtx);
++    // av_free(decoder);
+     ret = AVERROR_UNKNOWN;
+     goto fail;
+   }
+ 
+-  av_log(avctx, AV_LOG_ERROR, "init 3.\n");
++  decoder->first_packet = 1;
++  decoder->duration = 0;
++  decoder->use_dts = 0;
++  decoder->flushed = 0;
++
+   av_log(avctx, AV_LOG_DEBUG, "STCODEC decoder initialized successfully.\n");
+ 
+   decoder->device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DRM);
+@@ -264,37 +358,32 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+     ret = AVERROR(ENOMEM);
+     goto fail;
+   }
+-  av_log(avctx, AV_LOG_ERROR, "init 4.\n");
+   ret = av_hwdevice_ctx_init(decoder->device_ref);
+   if (ret < 0) {
+     av_log(avctx, AV_LOG_ERROR, "Failed to av_hwdevice_ctx_init\n");
+     goto fail;
+   }
+-  av_log(avctx, AV_LOG_ERROR, "init 5.\n");
+-
+-  decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
+-  if (!decoder->frames_ref) {
+-    av_log(avctx, AV_LOG_ERROR, "Failed to av_hwframe_ctx_alloc\n");
+-    ret = AVERROR(ENOMEM);
+-    goto fail;
+-  }
+-  av_log(avctx, AV_LOG_ERROR, "init 6.\n");
+-
+-  AVHWFramesContext* hwframes;
+-  hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
+-  hwframes->format = AV_PIX_FMT_DRM_PRIME;
+-  hwframes->sw_format = AV_PIX_FMT_NV12;
+-  hwframes->width = avctx->width;
+-  hwframes->height = avctx->height;
+-  ret = av_hwframe_ctx_init(decoder->frames_ref);
+-  if (ret < 0) goto fail;
++  /*
++    decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
++    if (!decoder->frames_ref) {
++      av_log(avctx, AV_LOG_ERROR, "Failed to av_hwframe_ctx_alloc\n");
++      ret = AVERROR(ENOMEM);
++      goto fail;
++    }
+ 
++    AVHWFramesContext* hwframes;
++    hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
++    hwframes->format = AV_PIX_FMT_DRM_PRIME;
++    hwframes->sw_format = AV_PIX_FMT_NV12;
++    hwframes->width = avctx->width;
++    hwframes->height = avctx->height;
++    ret = av_hwframe_ctx_init(decoder->frames_ref);
++    if (ret < 0) goto fail;
++  */
+   av_log(avctx, AV_LOG_DEBUG, "Initialized successfully.\n");
+-  av_log(avctx, AV_LOG_ERROR, "init 7.\n");
+   return 0;
+ 
+ fail:
+-  av_log(avctx, AV_LOG_ERROR, "init 8.\n");
+   av_log(avctx, AV_LOG_ERROR,
+          "Failed to initialize STCODEC decoder, please check!\n");
+   stcodec_close_decoder(avctx);
+@@ -305,23 +394,57 @@ static int stcodec_send_packet(AVCodecContext* avctx, const AVPacket* avpkt) {
+   STCODECDecodeContext* st_context = avctx->priv_data;
+   STCODECDecoder* decoder = (STCODECDecoder*)st_context->decoder_ref->data;
+   int ret;
+-  av_log(avctx, AV_LOG_DEBUG, "start send packet, pts(%ld)\n", avpkt->pts);
++  av_log(avctx, AV_LOG_DEBUG,
++         "start send packet, pts(%ld) dts(%ld) duration(%ld)\n", avpkt->pts,
++         avpkt->dts, avpkt->duration);
+ 
+   // handle EOF
+   if (!avpkt->size) {
+     av_log(avctx, AV_LOG_ERROR, "Get EOS from parser!\n");
+     decoder->eos_reached = 1;
+     // write a NULL data to decoder to inform it the EOS.
+-    ret = stcodec_send_data_to_decoder(avctx, NULL, 0, 0);
++    ret = stcodec_send_data_to_decoder(avctx, NULL, 0, 0, 0, 0);
+     if (ret)
+       av_log(avctx, AV_LOG_ERROR, "Failed to send EOS to decoder (ret = %d)\n",
+              ret);
+     return ret;
+   }
+ 
++  // on first packet, send extradata
++  if (decoder->first_packet) {
++    if (avctx->extradata_size) {
++      if (avctx->codec_id == AV_CODEC_ID_H264) {
++        ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
++                                           avctx->extradata_size, avpkt->pts,
++                                           avpkt->dts, avpkt->duration);
++      } else if (avctx->codec_id == AV_CODEC_ID_HEVC) {
++        ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
++                                           avctx->extradata_size, avpkt->pts,
++                                           avpkt->dts, avpkt->duration);
++      } else if (avctx->codec_id == AV_CODEC_ID_MJPEG) {
++        // do nothing.
++      } else if (avctx->codec_id == AV_CODEC_ID_MPEG4 ||
++                 avctx->codec_id == AV_CODEC_ID_VC1) {
++        ret = stcodec_send_data_to_decoder(avctx, avctx->extradata,
++                                           avctx->extradata_size, avpkt->pts,
++                                           avpkt->dts, avpkt->duration);
++        if (ret) {
++          av_log(avctx, AV_LOG_ERROR,
++                 "Failed to write extradata to decoder (ret = %d)\n", ret);
++          return ret;
++        } else {
++          av_log(avctx, AV_LOG_ERROR,
++                 "OK! Write extradata to decoder (size = %d)\n",
++                 avctx->extradata_size);
++        }
++      }
++    }
++    decoder->first_packet = 0;
++  }
++
+   // now send packet
+-  ret =
+-      stcodec_send_data_to_decoder(avctx, avpkt->data, avpkt->size, avpkt->pts);
++  ret = stcodec_send_data_to_decoder(avctx, avpkt->data, avpkt->size,
++                                     avpkt->pts, avpkt->dts, avpkt->duration);
+   if (ret) {
+     av_log(avctx, AV_LOG_DEBUG,
+            "Failed to write data to decoder (code = %d (%s))\n", ret,
+@@ -351,6 +474,7 @@ static void stcodec_release_frame(void* opaque, uint8_t* data) {
+       AV_PIX_FMT_DRM_PRIME) {
+     av_free(desc);
+   }
++  FRAME_Destory(framecontext->pFrame);
+   av_buffer_unref(&framecontext->decoder_ref);
+   av_buffer_unref(&framecontextref);
+ }
+@@ -373,15 +497,15 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+     // we get the available input queue num in decoder
+     VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
+     freeslots = decoder->pVdecPara->nInputQueueLeftNum;
+-    av_log(avctx, AV_LOG_ERROR, "--------- Input queue left %d seat!!\n", freeslots);
++    av_log(avctx, AV_LOG_DEBUG, "Input queue left %d seat!!\n", freeslots);
+ 
+-    if (freeslots > 0) {
++    while (freeslots > 0) {
+       ret = ff_decode_get_packet(avctx, &pkt);
+       if (ret < 0 && ret != AVERROR_EOF) {
+-        av_log(avctx, AV_LOG_ERROR,
++        av_log(avctx, AV_LOG_DEBUG,
+                "Failed to ff_decode_get_packet (ret = %d (%s))\n", ret,
+                av_err2str(ret));
+-        return ret;
++        goto fail;
+       }
+ 
+       ret = stcodec_send_packet(avctx, &pkt);
+@@ -391,114 +515,200 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+         av_log(avctx, AV_LOG_ERROR,
+                "Failed to send packet to decoder (code = %d (%s))\n", ret,
+                av_err2str(ret));
+-        return ret;
++        goto fail;
+       }
+-    }
+ 
+-    // make sure we keep decoder full
+-    VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
+-    freeslots = decoder->pVdecPara->nInputQueueLeftNum;
+-    av_log(avctx, AV_LOG_ERROR, "========== Input queue left %d seat!!\n", freeslots);
+-    if (freeslots > 0) return AVERROR(EAGAIN);
++      // make sure we keep decoder full
++      VDEC_GetParam(decoder->pVdecCtx, &(decoder->pVdecPara));
++      freeslots = decoder->pVdecPara->nInputQueueLeftNum;
++      av_log(avctx, AV_LOG_DEBUG, "Input queue left %d seat!!\n", freeslots);
++    }
+   }
+ 
+-  ret = VDEC_RequestOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++  do {
++    ret =
++        VDEC_RequestOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++    if (ret == MPP_CODER_NULL_DATA) {
++      av_log(avctx, AV_LOG_ERROR, "null data, return\n");
++      VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++    }
++  } while (ret == MPP_CODER_NO_DATA || ret == MPP_CODER_NULL_DATA);
+   av_log(avctx, AV_LOG_DEBUG, "Request frame (ret = %d)\n", ret);
+ 
+   if (ret == MPP_CODER_EOS && mppframe == NULL) {
+     av_log(avctx, AV_LOG_ERROR, "EOS 1!\n");
+-    return AVERROR_EOF;
++    ret = AVERROR_EOF;
++    goto fail;
+   }
+ 
+   if (ret == MPP_CODER_EOS ||
+       FRAME_GetEos(mppframe) == 1 /* || decoder->eos_reached*/) {
+     av_log(avctx, AV_LOG_ERROR, "EOS 2!\n");
+     VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
+-    return AVERROR_EOF;
++    ret = AVERROR_EOF;
++    goto fail;
+   }
+ 
+-  if (!ret) {
+-    av_log(NULL, AV_LOG_DEBUG, "stcodec request a frame\n");
++  if (ret == MPP_ERROR_FRAME) {
++    av_log(avctx, AV_LOG_ERROR, "error frame, need discard\n");
++    VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++    ret = AVERROR(EAGAIN);
++    goto fail;
++  }
+ 
+-    // setup general frame fields
+-    frame->format = avctx->pix_fmt;
+-    frame->width = avctx->width;
+-    frame->height = avctx->height;
+-    // frame->pts              = FRAME_GetPts(decoder->pFrame);
+-    frame->interlaced_frame = 0;
+-    frame->top_field_first = 0;
+-
+-    framecontextref = av_buffer_allocz(sizeof(*framecontext));
+-    if (!framecontextref) {
+-      av_log(avctx, AV_LOG_ERROR, "Failed to alloc AvBufferRef\n");
+-      ret = AVERROR(ENOMEM);
+-      return ret;
+-    }
++  if (ret == MPP_RESOLUTION_CHANGED) {
++    av_log(avctx, AV_LOG_ERROR,
++           "resolution changed!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
++    AVHWFramesContext* hwframes;
+ 
+-    // MPP decoder needs to be closed only when all frames have been released.
+-    framecontext = (STCODECFrameContext*)framecontextref->data;
+-    framecontext->decoder_ref = av_buffer_ref(st_context->decoder_ref);
+-    framecontext->pFrame = mppframe;
++    av_log(avctx, AV_LOG_DEBUG, "Decoder noticed an info change (%dx%d)\n",
++           decoder->pVdecCtx->stVdecPara.nWidth,
++           decoder->pVdecCtx->stVdecPara.nHeight);
+ 
+-    if (avctx->pix_fmt == AV_PIX_FMT_DRM_PRIME) {
+-      desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
+-      if (!desc) {
+-        ret = AVERROR(ENOMEM);
+-        return ret;
+-      }
++    avctx->width = decoder->pVdecCtx->stVdecPara.nWidth;
++    avctx->height = decoder->pVdecCtx->stVdecPara.nHeight;
+ 
+-      desc->nb_objects = 1;
+-      desc->objects[0].fd = FRAME_GetFD(mppframe, 0);
+-      desc->objects[0].size = frame->width * frame->height * 3 / 2;
+-      av_log(avctx, AV_LOG_DEBUG, "fd=%d size=%ld\n", desc->objects[0].fd,
+-             desc->objects[0].size);
+-      desc->nb_layers = 1;
+-      layer = &desc->layers[0];
+-      layer->format = DRM_FORMAT_NV12;
+-      layer->nb_planes = 2;
+-
+-      layer->planes[0].object_index = 0;
+-      layer->planes[0].offset = 0;
+-      layer->planes[0].pitch = frame->width;
+-
+-      layer->planes[1].object_index = 0;
+-      layer->planes[1].offset = frame->width * frame->height;
+-      layer->planes[1].pitch = frame->width;
+-
+-      frame->data[0] = (uint8_t*)desc;
+-      frame->buf[0] =
+-          av_buffer_create((uint8_t*)desc, sizeof(*desc), stcodec_release_frame,
+-                           framecontextref, AV_BUFFER_FLAG_READONLY);
+-    } else if (avctx->pix_fmt == AV_PIX_FMT_NV12) {
+-      frame->linesize[0] = get_stride(avctx->width, 8);
+-      frame->linesize[1] = get_stride(avctx->width, 8);
+-      frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
+-      frame->data[1] = frame->data[0] + frame->width * frame->height;
+-      frame->buf[0] = av_buffer_create(
+-          (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
+-          stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
+-    }
++    av_buffer_unref(&decoder->frames_ref);
+ 
+-    if (!frame->buf[0]) {
++    decoder->frames_ref = av_hwframe_ctx_alloc(decoder->device_ref);
++    if (!decoder->frames_ref) {
+       av_log(avctx, AV_LOG_ERROR,
+-             "Failed to create AVDRMFrameDescriptor ref\n");
++             "av_hwframe_ctx_alloc failed, please check\n");
+       ret = AVERROR(ENOMEM);
+-      return ret;
++      goto fail;
+     }
+ 
+-    frame->hw_frames_ctx = av_buffer_ref(decoder->frames_ref);
+-    if (!frame->hw_frames_ctx) {
+-      av_log(avctx, AV_LOG_ERROR, "Failed to create hw_frames_ctx\n");
+-      ret = AVERROR(ENOMEM);
+-      return ret;
++    hwframes = (AVHWFramesContext*)decoder->frames_ref->data;
++    hwframes->format = AV_PIX_FMT_DRM_PRIME;
++    hwframes->sw_format = AV_PIX_FMT_NV12;
++    hwframes->width = avctx->width;
++    hwframes->height = avctx->height;
++    ret = av_hwframe_ctx_init(decoder->frames_ref);
++    if (ret < 0) {
++      av_log(avctx, AV_LOG_ERROR, "av_hwframe_ctx_init failed, please check\n");
++      goto fail;
+     }
+ 
++    // here decoder is fully initialized, we need to feed it again with data
++    ret = AVERROR(EAGAIN);
++    goto fail;
++  }
++
++  if (!ret) {
++    av_log(NULL, AV_LOG_DEBUG, "stcodec request a frame\n");
++    if (!decoder->flushed) {
++      // setup general frame fields
++      frame->format = avctx->pix_fmt;
++      frame->width = avctx->width;
++      frame->height = avctx->height;
++      if (!decoder->no_pts) {
++        if (!decoder->use_dts) {
++          frame->pts = FRAME_GetPts(mppframe);
++        } else {
++          frame->pkt_dts = FRAME_GetPts(mppframe);
++        }
++      } else {
++      }
++      av_log(avctx, AV_LOG_DEBUG, "frame pts:%ld pkt_dts:%ld\n", frame->pts,
++             frame->pkt_dts);
++      frame->interlaced_frame = 0;
++      frame->top_field_first = 0;
++
++      framecontextref = av_buffer_allocz(sizeof(*framecontext));
++      if (!framecontextref) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to alloc AvBufferRef\n");
++        ret = AVERROR(ENOMEM);
++        goto fail;
++      }
++
++      // MPP decoder needs to be closed only when all frames have been released.
++      framecontext = (STCODECFrameContext*)framecontextref->data;
++      framecontext->decoder_ref = av_buffer_ref(st_context->decoder_ref);
++      framecontext->pFrame = mppframe;
++
++      if (avctx->pix_fmt == AV_PIX_FMT_DRM_PRIME) {
++        desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
++        if (!desc) {
++          ret = AVERROR(ENOMEM);
++          goto fail;
++        }
++
++        desc->nb_objects = 1;
++        desc->objects[0].fd = FRAME_GetFD(mppframe, 0);
++        desc->objects[0].size = frame->width * frame->height * 3 / 2;
++        av_log(avctx, AV_LOG_DEBUG, "fd=%d size=%ld\n", desc->objects[0].fd,
++               desc->objects[0].size);
++        desc->nb_layers = 1;
++        layer = &desc->layers[0];
++        layer->format = DRM_FORMAT_NV12;
++        layer->nb_planes = 2;
++
++        layer->planes[0].object_index = 0;
++        layer->planes[0].offset = 0;
++        layer->planes[0].pitch = frame->width;
++
++        layer->planes[1].object_index = 0;
++        layer->planes[1].offset = frame->width * frame->height;
++        layer->planes[1].pitch = frame->width;
++
++        frame->data[0] = (uint8_t*)desc;
++        frame->buf[0] = av_buffer_create((uint8_t*)desc, sizeof(*desc),
++                                         stcodec_release_frame, framecontextref,
++                                         AV_BUFFER_FLAG_READONLY);
++      } else if (avctx->pix_fmt == AV_PIX_FMT_NV12) {
++        frame->linesize[0] = get_stride(avctx->width, 8);
++        frame->linesize[1] = get_stride(avctx->width, 8);
++        frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
++        frame->data[1] = frame->data[0] + frame->width * frame->height;
++        frame->buf[0] = av_buffer_create(
++            (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
++            stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
++      }
++
++      if (!frame->buf[0]) {
++        av_log(avctx, AV_LOG_ERROR,
++               "Failed to create AVDRMFrameDescriptor ref\n");
++        ret = AVERROR(ENOMEM);
++        goto fail;
++      }
++
++      frame->hw_frames_ctx = av_buffer_ref(decoder->frames_ref);
++      if (!frame->hw_frames_ctx) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to create hw_frames_ctx\n");
++        ret = AVERROR(ENOMEM);
++        goto fail;
++      }
++    } else if (decoder->flushed < DROPFRAME_NUM_AFTER_FLUSH) {
++      VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++      av_log(avctx, AV_LOG_ERROR, "drop some frames after flush, num=%d\n",
++             decoder->flushed);
++      decoder->flushed++;
++      ret = AVERROR(EAGAIN);
++      goto fail;
++    } else if (decoder->flushed == DROPFRAME_NUM_AFTER_FLUSH) {
++      VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
++      ret = AVERROR(EAGAIN);
++      av_log(avctx, AV_LOG_ERROR,
++             "drop some frames after flush finish, num=%d\n", decoder->flushed);
++      decoder->flushed = 0;
++      goto fail;
++    }
+   } else {
+-    // return AVERROR_UNKNOWN;
+-    return AVERROR(EAGAIN);
++    av_log(avctx, AV_LOG_ERROR, "should not be here, ret = %d\n", ret);
++    ret = AVERROR(EAGAIN);
++    goto fail;
+   }
+ 
+   return 0;  // return AVERROR(EAGAIN);
++
++fail:
++  if (mppframe) FRAME_Destory(mppframe);
++  if (framecontext && framecontext->pFrame) FRAME_Destory(framecontext->pFrame);
++  if (framecontext) av_buffer_unref(&framecontext->decoder_ref);
++  if (framecontextref) av_buffer_unref(&framecontextref);
++  if (desc) av_free(desc);
++
++  return ret;
+ }
+ 
+ static void stcodec_flush(AVCodecContext* avctx) {
+@@ -507,13 +717,18 @@ static void stcodec_flush(AVCodecContext* avctx) {
+   int ret = -1;
+ 
+   av_log(avctx, AV_LOG_ERROR, "Flush.\n");
+-/*
+-  ret = VDEC_ResetChannel(decoder->pVdecCtx);
++
++  ret = VDEC_Flush(decoder->pVdecCtx);
+   if (ret)
+-    av_log(avctx, AV_LOG_ERROR, "Failed to reset VDEC Channel (code = %d)\n",
++    av_log(avctx, AV_LOG_ERROR, "Failed to flush VDEC Channel (code = %d)\n",
+            ret);
+-*/
++
+   decoder->eos_reached = 0;
++  decoder->no_pts = 0;
++  decoder->first_packet = 1;
++  decoder->duration = 0;
++  decoder->use_dts = 0;
++  decoder->flushed = 1;
+ }
+ 
+ static const AVCodecHWConfigInternal* const stcodec_hw_configs[] = {
+-- 
+2.25.1
+

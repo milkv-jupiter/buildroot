@@ -1,0 +1,27 @@
+From f14b1064fcc9ea570726034ac3766d742503c150 Mon Sep 17 00:00:00 2001
+From: maguoqun <guoqun.ma@spacemit.com>
+Date: Fri, 29 Mar 2024 17:23:27 +0800
+Subject: [PATCH] fix x86 host compile err which has no header file
+ riscv_vector.h
+
+---
+ crypto/evp/e_chacha20_poly1305.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/crypto/evp/e_chacha20_poly1305.c b/crypto/evp/e_chacha20_poly1305.c
+index feaf7a6..e56f232 100644
+--- a/crypto/evp/e_chacha20_poly1305.c
++++ b/crypto/evp/e_chacha20_poly1305.c
+@@ -8,7 +8,9 @@
+  */
+ 
+ #include <stdio.h>
++#if defined(__riscv_vector)
+ #include <riscv_vector.h>
++#endif
+ #include "internal/cryptlib.h"
+ 
+ #ifndef OPENSSL_NO_CHACHA
+-- 
+2.34.1
+

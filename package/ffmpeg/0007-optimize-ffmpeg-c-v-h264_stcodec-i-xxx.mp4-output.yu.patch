@@ -1,0 +1,38 @@
+From 6eb52b2c24bbc15ea991d40c7c7772f642881ae8 Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Wed, 20 Mar 2024 14:38:47 +0800
+Subject: [PATCH] optimize: ffmpeg -c:v h264_stcodec -i xxx.mp4 output.yuv
+
+---
+ libavcodec/stcodecdec.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+index 1d618b9..cf88096 100755
+--- a/libavcodec/stcodecdec.c
++++ b/libavcodec/stcodecdec.c
+@@ -532,7 +532,7 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+       av_log(avctx, AV_LOG_ERROR, "null data, return\n");
+       VDEC_ReturnOutputFrame(decoder->pVdecCtx, FRAME_GetBaseData(mppframe));
+     }
+-  } while (ret == MPP_CODER_NO_DATA || ret == MPP_CODER_NULL_DATA);
++  } while (ret == MPP_CODER_NULL_DATA);
+   av_log(avctx, AV_LOG_DEBUG, "Request frame (ret = %d)\n", ret);
+ 
+   if (ret == MPP_CODER_EOS && mppframe == NULL) {
+@@ -556,6 +556,12 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+     goto fail;
+   }
+ 
++  if (ret == MPP_CODER_NO_DATA) {
++    av_log(avctx, AV_LOG_ERROR, "no data, return\n");
++    ret = AVERROR(EAGAIN);
++    goto fail;
++  }
++
+   if (ret == MPP_RESOLUTION_CHANGED) {
+     av_log(avctx, AV_LOG_ERROR,
+            "resolution changed!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+-- 
+2.25.1
+

@@ -1,0 +1,162 @@
+From 8b1fed41efd82f4843899b02764612bc22fc0a0b Mon Sep 17 00:00:00 2001
+From: "lff@Snode" <junzhao.liang@spacemit.com>
+Date: Fri, 12 Apr 2024 14:32:03 +0800
+Subject: [PATCH] [fix] thumbnail bug
+
+---
+ simd/rvv/jquanti-rvv.c | 27 ++++++++++++-------
+ simd/rvv/jsimd.c       | 60 +++++++++++++++++++++---------------------
+ 2 files changed, 48 insertions(+), 39 deletions(-)
+
+diff --git a/simd/rvv/jquanti-rvv.c b/simd/rvv/jquanti-rvv.c
+index 69b2c20..66b72e6 100644
+--- a/simd/rvv/jquanti-rvv.c
++++ b/simd/rvv/jquanti-rvv.c
+@@ -84,7 +84,6 @@ void jsimd_convsamp_rvv(JSAMPARRAY sample_data, JDIMENSION start_col,
+ void jsimd_quantize_rvv(JCOEFPTR coef_block, DCTELEM *divisors,
+                         DCTELEM *workspace)
+ {
+-    int cols_remaining;
+     size_t vl;
+     JCOEFPTR out_ptr = coef_block;
+     DCTELEM *in_ptr = workspace;
+@@ -92,12 +91,11 @@ void jsimd_quantize_rvv(JCOEFPTR coef_block, DCTELEM *divisors,
+     UDCTELEM *recip_ptr = (UDCTELEM *)divisors;
+     UDCTELEM *corr_ptr = (UDCTELEM *)divisors + DCTSIZE2;
+ 
+-    vbool4_t mask;
+-    vint16m4_t out, shift;
++    vint16m4_t out, nout, shift, sign;
+     vuint16m4_t temp, recip, corr, ushift;
+     vuint32m8_t product;
+ 
+-    for (cols_remaining = DCTSIZE2; cols_remaining > 0; cols_remaining -= vl)
++    for (int cols_remaining = DCTSIZE2; cols_remaining > 0; cols_remaining -= vl)
+     {
+         /* Set vl for each iteration. */
+         vl = __riscv_vsetvl_e16m4(cols_remaining);
+@@ -108,19 +106,30 @@ void jsimd_quantize_rvv(JCOEFPTR coef_block, DCTELEM *divisors,
+         corr = __riscv_vle16_v_u16m4(corr_ptr, vl);
+         shift = __riscv_vle16_v_i16m4(shift_ptr, vl);
+ 
+-        /* Mask set to 1 where elements are negative. */
+-        mask = __riscv_vmslt_vx_i16m4_b4(out, 0, vl);
+-        out = __riscv_vneg_v_i16m4_m(mask, out, vl);
++        /* Extract sign from coefficients. */
++        sign = __riscv_vsra_vx_i16m4(out, 15, vl);
++
++        /* Get absolute value of DCT coefficients. */
++        nout = __riscv_vneg_v_i16m4(out, vl);
++        out = __riscv_vmax_vv_i16m4(out, nout, vl);
+         temp = __riscv_vreinterpret_v_i16m4_u16m4(out);
+ 
++        /* Add correction. */
+         temp = __riscv_vadd_vv_u16m4(temp, corr, vl);
++
++        /* Multiply DCT coefficients by quantization reciprocals. */
+         product = __riscv_vwmulu_vv_u32m8(temp, recip, vl);
++
++        /* Narrow back to 16-bit. */
+         shift = __riscv_vadd_vx_i16m4(shift, sizeof(DCTELEM) * 8, vl);
+         ushift = __riscv_vreinterpret_v_i16m4_u16m4(shift);
+         temp = __riscv_vnsrl_wv_u16m4(product, ushift, vl);
+ 
++        /* Restore sign to original product. */
+         out = __riscv_vreinterpret_v_u16m4_i16m4(temp);
+-        out = __riscv_vneg_v_i16m4_m(mask, out, vl);
++        out = __riscv_vxor_vv_i16m4(out, sign, vl);
++        out = __riscv_vsub_vv_i16m4(out, sign, vl);
++
+         __riscv_vse16_v_i16m4(out_ptr, out, vl);
+ 
+         in_ptr += vl;
+@@ -129,4 +138,4 @@ void jsimd_quantize_rvv(JCOEFPTR coef_block, DCTELEM *divisors,
+         corr_ptr += vl;
+         shift_ptr += vl;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/simd/rvv/jsimd.c b/simd/rvv/jsimd.c
+index 9277e76..1627ab0 100644
+--- a/simd/rvv/jsimd.c
++++ b/simd/rvv/jsimd.c
+@@ -734,22 +734,22 @@ jsimd_quantize_float(JCOEFPTR coef_block, FAST_FLOAT *divisors,
+ GLOBAL(int)
+ jsimd_can_idct_2x2(void)
+ {
+-  init_simd();
++  // init_simd();
+ 
+-  /* The code is optimised for these values only */
+-  if (DCTSIZE != 8)
+-    return 0;
+-  if (sizeof(JCOEF) != 2)
+-    return 0;
+-  if (BITS_IN_JSAMPLE != 8)
+-    return 0;
+-  if (sizeof(JDIMENSION) != 4)
+-    return 0;
+-  if (sizeof(ISLOW_MULT_TYPE) != 2)
+-    return 0;
++  // /* The code is optimised for these values only */
++  // if (DCTSIZE != 8)
++  //   return 0;
++  // if (sizeof(JCOEF) != 2)
++  //   return 0;
++  // if (BITS_IN_JSAMPLE != 8)
++  //   return 0;
++  // if (sizeof(JDIMENSION) != 4)
++  //   return 0;
++  // if (sizeof(ISLOW_MULT_TYPE) != 2)
++  //   return 0;
+ 
+-  if (simd_support & JSIMD_RVV)
+-    return 1;
++  // if (simd_support & JSIMD_RVV)
++  //   return 1;
+ 
+   return 0;
+ }
+@@ -757,22 +757,22 @@ jsimd_can_idct_2x2(void)
+ GLOBAL(int)
+ jsimd_can_idct_4x4(void)
+ {
+-  init_simd();
+-
+-  /* The code is optimised for these values only */
+-  if (DCTSIZE != 8)
+-    return 0;
+-  if (sizeof(JCOEF) != 2)
+-    return 0;
+-  if (BITS_IN_JSAMPLE != 8)
+-    return 0;
+-  if (sizeof(JDIMENSION) != 4)
+-    return 0;
+-  if (sizeof(ISLOW_MULT_TYPE) != 2)
+-    return 0;
+-
+-  if (simd_support & JSIMD_RVV)
+-    return 1;
++  // init_simd();
++
++  // /* The code is optimised for these values only */
++  // if (DCTSIZE != 8)
++  //   return 0;
++  // if (sizeof(JCOEF) != 2)
++  //   return 0;
++  // if (BITS_IN_JSAMPLE != 8)
++  //   return 0;
++  // if (sizeof(JDIMENSION) != 4)
++  //   return 0;
++  // if (sizeof(ISLOW_MULT_TYPE) != 2)
++  //   return 0;
++
++  // if (simd_support & JSIMD_RVV)
++  //   return 1;
+ 
+   return 0;
+ }
+-- 
+2.25.1
+

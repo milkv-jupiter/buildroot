@@ -23,6 +23,10 @@ ifeq ($(BR2_arm),y)
 ZLIB_NG_CONF_OPTS += -DWITH_ACLE=1
 endif
 
+ifeq ($(BR2_RISCV_64),y)
+ZLIB_NG_CONF_OPTS += -DCMAKE_C_FLAGS="-march=rv64gcv"
+endif
+
 ifeq ($(BR2_ARM_CPU_HAS_NEON)$(BR2_aarch64),y)
 ZLIB_NG_CONF_OPTS += -DWITH_NEON=ON
 else

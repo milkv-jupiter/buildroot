@@ -1,0 +1,53 @@
+From 4fd5362fcef8f8d7c10dd1624c40d29880a03324 Mon Sep 17 00:00:00 2001
+From: fuqiang <qiang.fu@spacemit.com>
+Date: Sun, 7 Apr 2024 19:46:55 +0800
+Subject: [PATCH] fix bug: video transcoding blur
+
+---
+ libavcodec/stcodecdec.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/libavcodec/stcodecdec.c b/libavcodec/stcodecdec.c
+index 66b1305..6acb89f 100755
+--- a/libavcodec/stcodecdec.c
++++ b/libavcodec/stcodecdec.c
+@@ -251,8 +251,8 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   MppCodingType codectype = CODING_UNKNOWN;
+   int ret;
+ 
+-  if ((avctx->width > 4096 || avctx->height > 2304 || avctx->width <= 640 ||
+-       avctx->height <= 480) &&
++  if ((avctx->width > 4096 || avctx->height > 4096 || avctx->width < 640 ||
++       avctx->height < 320) &&
+       (avctx->width != 0 || avctx->height != 0)) {
+     av_log(avctx, AV_LOG_ERROR,
+            "STCODEC Decoder do not support the size (%d x %d), too big or too "
+@@ -312,7 +312,15 @@ static int stcodec_init_decoder(AVCodecContext* avctx) {
+   decoder->pVdecCtx->stVdecPara.nWidth = avctx->width;
+   decoder->pVdecCtx->stVdecPara.nHeight = avctx->height;
+   decoder->pVdecCtx->stVdecPara.nStride = get_stride(avctx->width, 8);
+-  decoder->pVdecCtx->stVdecPara.eOutputPixelFormat = stcodec_get_pixelformat(avctx);
++  decoder->pVdecCtx->stVdecPara.eOutputPixelFormat =
++      stcodec_get_pixelformat(avctx);
++  if (avctx->pix_fmt == AV_PIX_FMT_DRM_PRIME) {
++    decoder->pVdecCtx->stVdecPara.eFrameBufferType =
++        MPP_FRAME_BUFFERTYPE_DMABUF_INTERNAL;
++  } else {
++    decoder->pVdecCtx->stVdecPara.eFrameBufferType =
++        MPP_FRAME_BUFFERTYPE_NORMAL_INTERNAL;
++  }
+   decoder->pVdecCtx->eCodecType = CODEC_V4L2_LINLONV5V7;
+   if (avctx->width >= 3840 || avctx->height >= 2160) {
+     av_log(avctx, AV_LOG_ERROR, "4K video, downscale!\n");
+@@ -665,7 +673,7 @@ static int stcodec_receive_frame(AVCodecContext* avctx, AVFrame* frame) {
+         frame->linesize[0] = get_stride(avctx->width, 8);
+         frame->linesize[1] = get_stride(avctx->width, 8);
+         frame->data[0] = FRAME_GetDataPointer(mppframe, 0);
+-        frame->data[1] = frame->data[0] + frame->width * frame->height;
++        frame->data[1] = FRAME_GetDataPointer(mppframe, 1);
+         frame->buf[0] = av_buffer_create(
+             (uint8_t*)(frame->data[0]), sizeof(frame->data[0]),
+             stcodec_release_frame, framecontextref, AV_BUFFER_FLAG_READONLY);
+-- 
+2.25.1
+

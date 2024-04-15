@@ -31,8 +31,8 @@ HAVEGED_CONF_OPTS += --disable-threads
 endif
 
 define HAVEGED_INSTALL_INIT_SYSV
-	$(INSTALL) -m 755 -D package/haveged/S21haveged \
-		$(TARGET_DIR)/etc/init.d/S21haveged
+	$(INSTALL) -m 755 -D package/haveged/S09haveged \
+		$(TARGET_DIR)/etc/init.d/S09haveged
 endef
 
 define HAVEGED_INSTALL_INIT_SYSTEMD
