@@ -1,0 +1,236 @@
+From 94ab2168a93212b73c96a24778eb51c13aae1122 Mon Sep 17 00:00:00 2001
+From: lilijun <lijun.li@spacemit.com>
+Date: Fri, 19 Apr 2024 19:45:52 +0800
+Subject: [PATCH] desktop shell Add Z order support
+
+https://renesas.info/wiki/RZ-G/RZG_weston
+---
+ desktop-shell/shell.c | 156 +++++++++++++++++++++++++++++++++++++++++-
+ desktop-shell/shell.h |   1 +
+ 2 files changed, 156 insertions(+), 1 deletion(-)
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 63e1431..9db21d4 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -34,7 +34,10 @@
+ #include <assert.h>
+ #include <signal.h>
+ #include <math.h>
++#include <fcntl.h>
++#include <errno.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
+ 
+ #include "shell.h"
+ #include "compositor/weston.h"
+@@ -45,6 +48,9 @@
+ #include "shared/timespec-util.h"
+ #include <libweston-desktop/libweston-desktop.h>
+ 
++#define PROC_SIZE 100
++#define APP_NAME_SIZE 4096
++
+ #define DEFAULT_NUM_WORKSPACES 1
+ #define DEFAULT_WORKSPACE_CHANGE_ANIMATION_LENGTH 200
+ 
+@@ -521,6 +527,9 @@ shell_configuration(struct desktop_shell *shell)
+ 	weston_config_section_get_uint(section, "num-workspaces",
+ 				       &shell->workspaces.num,
+ 				       DEFAULT_NUM_WORKSPACES);
++
++	weston_config_section_get_string(section, "top-app-name", &s, NULL);
++	shell->top_app_name = s;
+ }
+ 
+ static int
+@@ -1855,6 +1864,130 @@ shell_surface_activate(struct shell_surface *shsurf)
+ 		weston_desktop_surface_set_activated(shsurf->desktop_surface, true);
+ }
+ 
++static void app_name_remove_spaces(char *buffer, ssize_t size) {
++	int i, j = 0;
++
++	if (!buffer)
++		return;
++
++	if (size < 0)
++		return;
++
++	for (i = 0; i < size; i++) {
++		if ((buffer[i] != ' ') && (buffer[i] != '\0') ) {
++			buffer[j] = buffer[i];
++			j++;
++		}
++	}
++	buffer[j] = '\0';
++}
++
++/* Return true if the application name is obtained. Otherwise, return false. */
++static bool
++shell_surface_get_app_name(struct shell_surface *shsurf, char *app_name, size_t len)
++{
++	int fd;
++	pid_t pid;
++	char *buffer;
++	ssize_t read_sz;
++	const char *basename;
++	char file_name[PROC_SIZE];
++
++	/* Initialize empty string */
++	app_name[0] = '\0';
++
++	/* Get PID */
++	pid = weston_desktop_surface_get_pid(shsurf->desktop_surface);
++
++	/* Get application name */
++	snprintf(file_name, PROC_SIZE, "/proc/%u/cmdline", pid);
++
++	/* Open cmdline file. This file holds the complete command line for the
++	 * process, unless the process is a zombie. In the later case, there is
++	 * nothing in this file: that is, a read on this file will return 0
++	 * characters. The command-line arguments appear in this file as a set
++	 * of strings separated by null bytes ('\0'), with a further null byte
++	 * after the last string.
++	 *
++	 * Example 1:
++	 *   root@smarc-rzg2l:~# /usr/bin/weston-simple-egl -o -f -s > /dev/null &
++	 *   [1] 283
++	 *   root@smarc-rzg2l:~# cat -A /proc/283/cmdline
++	 *   /usr/bin/weston-simple-egl^@-o^@-f^@-s^@
++	 *
++	 * Example 2:
++	 *   root@smarc-rzg2l:~# gst-launch-1.0 videotestsrc ! autovideosink &
++	 *   [2] 294
++	 *   root@smarc-rzg2l:~# cat -A /proc/294/cmdline
++	 *   gst-launch-1.0^@videotestsrc^@!^@autovideosink^@
++	 *
++	 * Note: ^@ is caret notation of the null byte, which is '\0' in char or
++	 * 0 in number.
++	 */
++	fd = open(file_name, O_RDONLY);
++	if (fd == -1)
++		return false;
++
++	/* Allocate a temporary buffer */
++	buffer = malloc(len);
++	if (!buffer) {
++		close(fd);
++		return false;
++	}
++
++	/* Read the file. Retry if the call was interrupted by a signal
++	 * before any data was read */
++	do {
++		read_sz = read(fd, buffer, len);
++	} while(read_sz < 0 && errno == EINTR);
++
++	/* Close the file */
++	close(fd);
++
++	/* Return false if there was an error reading the file or it's empty */
++	if (read_sz <= 0) {
++		free(buffer);
++		return false;
++	}
++
++	/* In case we haven't read the entire content */
++	buffer[read_sz] = '\0';
++
++	/* Get application name from the path name.
++	 * For example: "weston-smoke" is extracted from "/usr/bin/weston-smoke" */
++#if 0
++	basename = strrchr(buffer, '/');
++	basename = (basename) ? basename + 1 : buffer;
++#else
++	app_name_remove_spaces(buffer, read_sz);
++	basename =  buffer;
++#endif
++	strcpy(app_name, basename);
++
++	free(buffer);
++	return true;
++}
++
++/* Return true if the app name of surface is equal to shell->top_app_name. */
++static bool
++shell_surface_is_always_on_top(struct shell_surface *shsurf)
++{
++	struct desktop_shell *shell;
++	char app_name[APP_NAME_SIZE];
++
++	shell = shell_surface_get_shell(shsurf);
++	if (!shell->top_app_name)
++		return false;
++
++	if (!shell_surface_get_app_name(shsurf, app_name, APP_NAME_SIZE))
++		return false;
++
++	if (strcmp(app_name, shell->top_app_name) != 0)
++		return false;
++
++	return true;
++}
++
+ /* The surface will be inserted into the list immediately after the link
+  * returned by this function (i.e. will be stacked immediately above the
+  * returned link). */
+@@ -1862,6 +1995,9 @@ static struct weston_layer_entry *
+ shell_surface_calculate_layer_link (struct shell_surface *shsurf)
+ {
+ 	struct workspace *ws;
++	struct weston_view *view;
++	struct shell_surface *shsurf_sibling;
++	struct weston_layer_entry *layer_link;
+ 
+ 	if (weston_desktop_surface_get_fullscreen(shsurf->desktop_surface) &&
+ 	    !shsurf->state.lowered) {
+@@ -1872,7 +2008,24 @@ shell_surface_calculate_layer_link (struct shell_surface *shsurf)
+ 	 * which were previously fullscreen or transient are no longer
+ 	 * rendered on top. */
+ 	ws = get_current_workspace(shsurf->shell);
+-	return &ws->layer.view_list;
++
++	layer_link = &ws->layer.view_list;
++
++	if (!shell_surface_is_always_on_top(shsurf))
++		/* Find the lowest surface that is marked as always-on-top so that
++		 * the current surface can be inserted right after it. */
++		wl_list_for_each(view, &ws->layer.view_list.link, layer_link.link) {
++			shsurf_sibling = get_shell_surface(view->surface);
++			if (!shsurf_sibling)
++				continue;
++
++			if (!shell_surface_is_always_on_top(shsurf_sibling))
++				break;
++			else
++				layer_link = &view->layer_link;
++		}
++
++	return layer_link;
+ }
+ 
+ static void
+@@ -5037,6 +5190,7 @@ shell_destroy(struct wl_listener *listener, void *data)
+ 	desktop_shell_destroy_layer(&shell->fullscreen_layer);
+ 
+ 	free(shell->client);
++	free(shell->top_app_name);
+ 	free(shell);
+ }
+ 
+diff --git a/desktop-shell/shell.h b/desktop-shell/shell.h
+index b06b906..7e3b566 100644
+--- a/desktop-shell/shell.h
++++ b/desktop-shell/shell.h
+@@ -217,6 +217,7 @@ struct desktop_shell {
+ 	enum weston_desktop_shell_panel_position panel_position;
+ 
+ 	char *client;
++	char *top_app_name;
+ 
+ 	struct timespec startup_time;
+ };
+-- 
+2.25.1
+
