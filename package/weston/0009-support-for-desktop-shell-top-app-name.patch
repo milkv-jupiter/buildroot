@@ -1,0 +1,51 @@
+From e004aceefdf494832500114b136b6b50d889de26 Mon Sep 17 00:00:00 2001
+From: lilijun <lijun.li@spacemit.com>
+Date: Mon, 22 Apr 2024 12:40:53 +0800
+Subject: [PATCH] support * for desktop shell top app name
+
+---
+ desktop-shell/shell.c | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 473c0c5..3ba99d6 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -1974,6 +1974,8 @@ shell_surface_is_always_on_top(struct shell_surface *shsurf)
+ {
+ 	struct desktop_shell *shell;
+ 	char app_name[APP_NAME_SIZE];
++	char top_app_name[APP_NAME_SIZE];
++	int len;
+ 
+ 	shell = shell_surface_get_shell(shsurf);
+ 	if (!shell->top_app_name)
+@@ -1986,10 +1988,22 @@ shell_surface_is_always_on_top(struct shell_surface *shsurf)
+ 	if (strcmp(app_name, shell->top_app_name) != 0)
+ 		return false;
+ #else
+-	if (strstr(app_name, shell->top_app_name) == app_name)
+-		return true;
+-	else
++	len = strlen(shell->top_app_name);
++	if (len < 1)
+ 		return false;
++
++	strcpy(top_app_name, shell->top_app_name);
++
++	if (top_app_name[len - 1] == '*') {
++		top_app_name[len - 1] = '\0';
++		if (strstr(app_name, top_app_name) != app_name)
++			return false;
++
++	} else {
++		if (strcmp(app_name, shell->top_app_name) != 0)
++			return false;
++	}
++
+ #endif
+ 
+ 	return true;
+-- 
+2.25.1
+

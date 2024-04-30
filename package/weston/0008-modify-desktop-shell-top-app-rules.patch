@@ -1,0 +1,32 @@
+From d98013fec1fac116bc4ae645aa8a1a27c5cb67b1 Mon Sep 17 00:00:00 2001
+From: lilijun <lijun.li@spacemit.com>
+Date: Mon, 22 Apr 2024 10:49:04 +0800
+Subject: [PATCH] modify desktop shell top app rules
+
+---
+ desktop-shell/shell.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 9db21d4..473c0c5 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -1982,8 +1982,15 @@ shell_surface_is_always_on_top(struct shell_surface *shsurf)
+ 	if (!shell_surface_get_app_name(shsurf, app_name, APP_NAME_SIZE))
+ 		return false;
+ 
++#if 0
+ 	if (strcmp(app_name, shell->top_app_name) != 0)
+ 		return false;
++#else
++	if (strstr(app_name, shell->top_app_name) == app_name)
++		return true;
++	else
++		return false;
++#endif
+ 
+ 	return true;
+ }
+-- 
+2.25.1
+

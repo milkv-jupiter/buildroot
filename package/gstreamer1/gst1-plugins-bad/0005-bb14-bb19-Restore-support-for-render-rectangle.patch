@@ -1,0 +1,1982 @@
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitallocator.c b/ext/spacemit/spacemitcodec/gstspacemitallocator.c
+index a677114..df31d69 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitallocator.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitallocator.c
+@@ -29,400 +29,50 @@
+ 
+ #include "gstspacemitallocator.h"
+ 
+-#define GST_CAT_DEFAULT spacemitallocator_debug_category
++#define GST_CAT_DEFAULT spacemit_dec_allocator_debug_category
+ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
+ 
+-#define GST_SPACEMIT_MEMORY_TYPE "SpaceMitMemory"
++#define GST_SPACEMIT_DEC_MEMORY_TYPE "SpaceMitDecMemory"
+ 
+-#define parent_class gst_spacemit_allocator_parent_class
++#define parent_class spacemit_dec_allocator_debug_category
+ 
+-G_DEFINE_TYPE_WITH_CODE (GstSpaceMitAllocator, gst_spacemit_allocator,
+-    GST_TYPE_ALLOCATOR,
+-    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitallocator", 0,
+-    "SPACEMIT allocator"));
++G_DEFINE_TYPE_WITH_CODE (GstSpaceMitDecAllocator, gst_spacemit_dec_allocator,
++    GST_TYPE_DMABUF_ALLOCATOR,
++    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitdecallocator", 0,
++    "Spacemit Dec Dma allocator"));
+ 
+ GQuark
+-gst_spm_dmabuf_memory_quark (void)
++gst_spacemit_dec_dmabuf_memory_quark (void)
+ {
+   static GQuark quark = 0;
+ 
+   if (quark == 0)
+-    quark = g_quark_from_static_string ("GstSpmDmabufMemory");
++    quark = g_quark_from_static_string ("GstSpacemitDecDmabufMemory");
+ 
+   return quark;
+ }
+-GQuark
+-gst_spacemit_allocator_quark (void)
+-{
+-  static GQuark quark = 0;
+-
+-  if (quark == 0)
+-    quark = g_quark_from_static_string ("GstSpaceMitAllocator");
+-
+-  return quark;
+-}
+-
+-gboolean
+-gst_is_spacemit_memory (GstMemory * base_mem)
+-{
+-  return gst_memory_is_type (base_mem, GST_SPACEMIT_MEMORY_TYPE);
+-}
+-
+-static void
+-gst_spacemit_allocator_free (GstAllocator * allocator, GstMemory * base_mem)
+-{
+-//  GstSpaceMitAllocator *alloc = GST_SPACEMIT_ALLOCATOR (allocator);
+-  GstSpaceMitMemory *mem = (GstSpaceMitMemory *) base_mem;
+-  GST_DEBUG ("ZRong ------------------- spacemit free mem");
+-
+-  g_warn_if_fail (!mem->acquired);
+-
+-  if (mem->foreign_mem)
+-    gst_memory_unref (mem->foreign_mem);
+-  else
+-     GST_ERROR ("ZRong err ------------------- spacemit free");
+-
+-//  g_slice_free (GstSpaceMitMemory, mem);
+-
+-//  GST_ALLOCATOR_CLASS (parent_class)->free (allocator, mem);
+-}
+-
+-static void
+-gst_unref_spacemit_mem (gpointer key, gpointer value, gpointer user_data)
+-{
+-  GstMemory *base_mem = (GstMemory *)value;
+-  GstSpaceMitMemory *mem;
+-
+-  if (GST_IS_SPACEMIT_ALLOCATOR (base_mem->allocator))
+-    mem = (GstSpaceMitMemory *) base_mem;
+-  else
+-    mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK);
+-
+-  if (value) {
+-    GST_DEBUG ("allocator finalize, mem:%p, base_mem:%p, %d", mem, base_mem, base_mem->mini_object.refcount);
+-    gst_memory_unref(base_mem);
+-  } else {
+-    GST_ERROR ("allocator finalize err, base_mem:%p, %d", base_mem, base_mem->mini_object.refcount);
+-  }
+-  g_slice_free (GstSpaceMitMemory, mem);
+-}
+ 
+ static void
+-gst_spacemit_allocator_finalize (GObject * obj)
++gst_spacemit_dec_allocator_finalize (GObject * obj)
+ {
+-  GstSpaceMitAllocator *alloc = GST_SPACEMIT_ALLOCATOR (obj);
+-  GST_DEBUG_OBJECT (alloc, "start allocator finalize, refcount:%d", GST_OBJECT_REFCOUNT_VALUE(alloc));
++  GstSpaceMitDecAllocator *alloc = GST_SPACEMIT_DEC_ALLOCATOR (obj);
++  GST_DEBUG_OBJECT (alloc, "ZRong ------------------- spacemit allocator finalize");
+ 
+   G_OBJECT_CLASS (parent_class)->finalize (obj);
+ }
+-/* installed as the GstMiniObject::dispose function of the acquired GstMemory */
+-static gboolean
+-gst_spacemit_allocator_memory_dispose (GstMemory * base_mem)
+-{
+-  GstSpaceMitMemory *mem;
+-  GstSpaceMitAllocator *allocator;
+-  gint fd = -1;
+-
+-  if (GST_IS_SPACEMIT_ALLOCATOR (base_mem->allocator)) {
+-    mem = (GstSpaceMitMemory *) base_mem;
+-    allocator = (GstSpaceMitAllocator *)base_mem->allocator;
+-    fd = -1;
+-  } else {
+-    mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK);
+-    allocator = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPACEMIT_ALLOCATOR_QUARK);
+-    fd = gst_fd_memory_get_fd(base_mem);
+-  }
+-
+-  base_mem->size = mem->memsize;
+-
+-  if (mem->acquired) 
+-  {
+-    VDEC_ReturnOutputFrame(mem->ctx, FRAME_GetBaseData(mem->mppframe));
+-    FRAME_Destory(mem->mppframe);
+-    mem->ctx = NULL;
+-    mem->mppframe = NULL;
+-
+-    /* keep the memory alive */
+-    gst_memory_ref (base_mem);
+-    GST_DEBUG ("memory dispose success, mem %p fd:(%d, %d), id:%d, base_mem:%p, refcount:%d",
+-        mem, mem->fd, fd, mem->mppframe_id, base_mem, base_mem->mini_object.refcount);
+-
+-    mem->acquired = FALSE;
+-
+-    return FALSE;
+-  }
+-  GST_DEBUG ("memory dispose222 success, mem %p fd:(%d, %d), id:%d, base_mem:%p, ref:%d",
+-      mem, mem->fd, fd, mem->mppframe_id, base_mem, base_mem->mini_object.refcount);
+-
+-  return TRUE;
+-}
+-
+-static GstSpaceMitMemory *
+-gst_spacemit_memory_new (GstSpaceMitAllocator * allocator, gsize maxsize,
+-    GstMemoryFlags flags, GstMemory * parent, gssize offset, gssize size)
+-{
+-  GstSpaceMitMemory *mem;
+-  gint align;
+-
+-  /* GStreamer uses a bitmask for the alignment while
+-   * OMX uses the alignment itself. So we have to convert
+-   * here */
+-  align = 0;
+-
+-  if (size == -1) {
+-    size = maxsize - offset;
+-  }
+-
+-  mem = g_slice_new0 (GstSpaceMitMemory);
+-  gst_memory_init (GST_MEMORY_CAST (mem), flags, (GstAllocator *) allocator,
+-      parent, maxsize, align, offset, size);
+-
+-  mem->memsize = size;
+-  mem->acquired = FALSE;
+-
+-  return mem;
+-}
+-
+-static inline void
+-install_mem_dispose (GstMemory * base_mem)
+-{
+-  GST_MINI_OBJECT_CAST (base_mem)->dispose =
+-      (GstMiniObjectDisposeFunction) gst_spacemit_allocator_memory_dispose;
+-}
+-
+-GstMemory *
+-gst_spacemit_allocator_alloc (GstSpaceMitAllocator * allocator, gsize size)
+-{
+-  GstMemory *ret_mem;
+-  GstSpaceMitMemory *mem;
+-  guint8 *data;
+-
+-  GST_DEBUG_OBJECT (allocator, "allocator alloc paras, size: %d", size);
+-
+-  if (allocator->mode == GST_SPM_MEMORY_TYPE_SYSTEM) {
+-    mem = gst_spacemit_memory_new (allocator, size, 0, NULL, 0, size);
+-    install_mem_dispose (GST_MEMORY_CAST (mem));
+-  } else {
+-    mem = g_slice_new0 (GstSpaceMitMemory);
+-    mem->memsize = size;
+-    mem->acquired = FALSE;
+-    mem->fd = allocator->dmabuf_fd;
+-
+-    mem->foreign_mem =
+-        gst_fd_allocator_alloc (allocator->foreign_allocator, allocator->dmabuf_fd, size, GST_FD_MEMORY_FLAG_DONT_CLOSE);
+-    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem->foreign_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK, mem, NULL);
+-    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem->foreign_mem),
+-        GST_SPACEMIT_ALLOCATOR_QUARK, allocator, NULL);
+-    install_mem_dispose (mem->foreign_mem);
+-  }
+-
+-  ret_mem = mem->foreign_mem ? mem->foreign_mem : (GstMemory *) mem;
+-
+-  GST_DEBUG_OBJECT (allocator, "allocator success alloc mem:%p, return mem:%p", mem, ret_mem);
+-
+-  return ret_mem;
+-}
+-
+-GstFlowReturn
+-gst_spacemit_allocator_acquire (GstAllocator * base_allocator, GstMemory ** memory)
+-{
+-  GstMemory *base_mem;
+-  GstSpaceMitMemory *mem;
+-  GstSpaceMitAllocator *allocator = GST_SPACEMIT_ALLOCATOR (base_allocator);
+-
+-  base_mem = (GstMemory *) g_hash_table_lookup (allocator->memories, GINT_TO_POINTER(allocator->mppframe_id));
+-  if (!base_mem) {
+-    base_mem = gst_spacemit_allocator_alloc (allocator, allocator->info.size);
+-    GST_DEBUG_OBJECT (allocator, "insert id%d fd%d to memories hash", allocator->mppframe_id, allocator->dmabuf_fd);
+-    g_hash_table_insert(allocator->memories, GINT_TO_POINTER(allocator->mppframe_id), base_mem);
+-  }
+-  if (GST_IS_SPACEMIT_ALLOCATOR (base_mem->allocator))
+-    mem = (GstSpaceMitMemory *) base_mem;
+-  else
+-    mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK);
+-  mem->acquired = TRUE;
+-  mem->mppframe_id = allocator->mppframe_id;
+-  *memory = base_mem;
+-
+-  GST_DEBUG_OBJECT (allocator, "acquire mem %p size:%d, fd:%d, id:%d, base_mem:%p", mem, (*memory)->size, mem->fd, mem->mppframe_id, base_mem);
+-  return GST_FLOW_OK;
+-}
+-
+-gboolean
+-gst_spacemit_allocator_configure(GstAllocator * base_allocator, GstVideoInfo * info,  gboolean use_dmabuf)
+-{
+-  GstSpaceMitAllocator *allocator = GST_SPACEMIT_ALLOCATOR (base_allocator);
+-  if (!info) {
+-    GST_ERROR_OBJECT (allocator, "error, get a NULL info to allocator!");
+-    return FALSE;
+-  }
+-  allocator->info = *info;
+-
+-  if (use_dmabuf) {
+-    allocator->foreign_allocator = gst_dmabuf_allocator_new ();
+-    allocator->mode = GST_SPM_MEMORY_TYPE_DMABUF;
+-    GST_DEBUG_OBJECT (allocator, "create a dmabuf allocator!");
+-  } else {
+-    allocator->mode = GST_SPM_MEMORY_TYPE_SYSTEM;
+-  }
+-
+-  allocator->memories = g_hash_table_new (g_direct_hash, g_direct_equal);
+-  allocator->mppframe_id = -1;
+-  allocator->active = FALSE;
+-  allocator->mem_back = TRUE;
+-  g_mutex_init (&allocator->lock);
+-
+-  return TRUE;
+-}
+-
+-static void
+-gst_check_mem_status (gpointer key, gpointer value, gpointer user_data)
+-{
+-  GstMemory *base_mem = (GstMemory *)value;
+-  GstSpaceMitAllocator *allocator = (GstSpaceMitAllocator *)user_data;
+-  GstSpaceMitMemory *mem;
+-
+-  if (GST_IS_SPACEMIT_ALLOCATOR (base_mem->allocator))
+-    mem = (GstSpaceMitMemory *) base_mem;
+-  else
+-    mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK);
+-
+-  if (mem->acquired == TRUE) {
+-    GST_DEBUG_OBJECT (allocator, "check, mem%d had acquired, mem:%p, base_mem:%p, ref:%d",
+-        mem->mppframe_id, mem, base_mem, base_mem->mini_object.refcount);
+-    allocator->mem_back = FALSE;
+-  }
+-  GST_DEBUG_OBJECT (allocator, "check mem status: %d, %d, %d", mem->mppframe_id, mem->acquired, allocator->mem_back);
+-
+-}
+-
+-gboolean
+-gst_spacemit_allocator_wait_inactive (GstAllocator * base_allocator)
+-{
+-  GstSpaceMitAllocator *allocator = GST_SPACEMIT_ALLOCATOR (base_allocator);
+-
+-  while (TRUE) {
+-    allocator->mem_back = TRUE;
+-    g_hash_table_foreach (allocator->memories, gst_check_mem_status, allocator);
+-
+-    GST_DEBUG_OBJECT (allocator, "alloctor check mem all back is: %d", allocator->mem_back);
+-    break;
+-    if (allocator->mem_back) {
+-      break;
+-    } else {
+-      GST_DEBUG_OBJECT (allocator, "wait for spacemit mem inactive");
+-      g_usleep(5 * 1000);
+-    }
+-  }
+-}
+-
+-void gst_spacemitdec_mem_hash_reinit (GstAllocator * base_allocator)
+-{
+-  GstSpaceMitAllocator *allocator = GST_SPACEMIT_ALLOCATOR (base_allocator);
+-
+-  g_hash_table_foreach (allocator->memories, gst_unref_spacemit_mem, NULL);
+-  g_hash_table_remove_all (allocator->memories);
+-}
+-
+-gboolean
+-gst_spacemit_allocator_set_active (GstSpaceMitAllocator * allocator, gboolean active)
+-{
+-  gboolean changed = FALSE;
+-
+-  g_mutex_lock (&allocator->lock);
+-
+-  if (allocator->active != active)
+-    changed = TRUE;
+-
+-  GST_DEBUG_OBJECT (allocator, "start allocator set active, cur:%d, set:%d", allocator->active, active);
+-
+-  if (changed) {
+-    if (active) {
+-
+-    } else {
+-      gst_spacemit_allocator_wait_inactive(allocator);
+-      g_hash_table_foreach (allocator->memories, gst_unref_spacemit_mem, NULL);
+-      g_hash_table_remove_all (allocator->memories);
+-      if (allocator->foreign_allocator) {
+-        GST_DEBUG_OBJECT (allocator, "allocator refcount (%d %d) (%d %d)",
+-            GST_OBJECT_REFCOUNT_VALUE(allocator->foreign_allocator), GST_OBJECT_REFCOUNT(allocator->foreign_allocator),
+-            GST_OBJECT_REFCOUNT_VALUE(allocator), GST_OBJECT_REFCOUNT(allocator));
+-        g_object_unref (allocator->foreign_allocator);
+-        allocator->foreign_allocator = NULL;
+-      }
+-    }
+-  }
+-
+-  allocator->active = active;
+-  g_mutex_unlock (&allocator->lock);
+-  GST_DEBUG_OBJECT (allocator, "finish allocator set active");
+-
+-  return changed;
+-}
+ 
+ GstAllocator *
+-gst_spacemit_allocator_new (void)
++gst_spacemit_dec_allocator_new (void)
+ {
+-  GstSpaceMitAllocator *allocator;
++  GstSpaceMitDecAllocator *allocator;
+ 
+-  allocator = g_object_new (GST_TYPE_SPACEMIT_ALLOCATOR, NULL);
+-
+-  allocator->id = 666;
++  allocator = g_object_new (GST_TYPE_SPACEMIT_DEC_ALLOCATOR, NULL);
+ 
+   return GST_ALLOCATOR_CAST (allocator);
+ }
+ 
+-static gpointer
+-gst_spacemit_memory_map (GstMemory * base_mem, gsize maxsize, GstMapFlags flags)
+-{
+-  GstSpaceMitMemory *mem = (GstSpaceMitMemory *) base_mem;
+-  GST_DEBUG ("ZRong ------------------- af memory_map (%d, %d)", maxsize, mem->mppframe_id);
+-
+-  return FRAME_GetDataPointer(mem->mppframe, 0);
+-}
+-static void
+-gst_spacemit_memory_unmap (GstMemory * base_mem)
+-{
+-}
+-
+-void
+-gst_spacemit_allocator_get_info (GstAllocator * base_allocator, gint32 id, gint32 fd)
+-{
+-  GstSpaceMitAllocator *allocator = GST_SPACEMIT_ALLOCATOR (base_allocator);
+-
+-  if (id < 0)
+-    GST_ERROR_OBJECT (allocator, "error, get a invaild id: %d !", id);
+-
+-  if (fd < 0 && allocator->mode == GST_SPM_MEMORY_TYPE_DMABUF) {
+-    GST_ERROR_OBJECT (allocator, "error, get a invaild fd: %d in dmabuf mode!", fd);
+-  }
+-
+-  allocator->mppframe_id = id;
+-  allocator->dmabuf_fd = fd;
+-}
+-void
+-gst_spacemit_set_mem (GstMemory * base_mem, MppFrame *mppframe, MppVdecCtx *ctx)
+-{
+-  GstSpaceMitMemory *mem;
+-
+-  if (GST_IS_SPACEMIT_ALLOCATOR (base_mem->allocator))
+-    mem = (GstSpaceMitMemory *) base_mem;
+-  else
+-    mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (base_mem),
+-        GST_SPM_DMABUF_MEMORY_QUARK);
+-
+-  mem->mppframe = mppframe;
+-  mem->ctx = ctx;
+-}
+-
+ static void
+-gst_spacemit_allocator_class_init (GstSpaceMitAllocatorClass * klass)
++gst_spacemit_dec_allocator_class_init (GstSpaceMitDecAllocatorClass * klass)
+ {
+   GObjectClass *gobject_class;
+   GstAllocatorClass *allocator_class;
+@@ -430,21 +80,13 @@ gst_spacemit_allocator_class_init (GstSpaceMitAllocatorClass * klass)
+   allocator_class = GST_ALLOCATOR_CLASS (klass);
+   gobject_class = G_OBJECT_CLASS (klass);
+ 
+-  allocator_class->alloc = NULL;
+-  allocator_class->free = gst_spacemit_allocator_free;
+-
+-  gobject_class->finalize = gst_spacemit_allocator_finalize;
++  gobject_class->finalize = gst_spacemit_dec_allocator_finalize;
+ }
+ 
+ static void
+-gst_spacemit_allocator_init (GstSpaceMitAllocator * allocator)
++gst_spacemit_dec_allocator_init (GstSpaceMitDecAllocator * allocator)
+ {
+   GstAllocator *alloc = GST_ALLOCATOR_CAST (allocator);
+ 
+-  alloc->mem_type = GST_SPACEMIT_MEMORY_TYPE;
+-  alloc->mem_map = gst_spacemit_memory_map;
+-  alloc->mem_unmap = gst_spacemit_memory_unmap;
+-
+-  GST_OBJECT_FLAG_SET (allocator, GST_ALLOCATOR_FLAG_CUSTOM_ALLOC);
++  alloc->mem_type = GST_SPACEMIT_DEC_MEMORY_TYPE;
+ }
+-
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitallocator.h b/ext/spacemit/spacemitcodec/gstspacemitallocator.h
+index b4a0b9f..745a073 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitallocator.h
++++ b/ext/spacemit/spacemitcodec/gstspacemitallocator.h
+@@ -28,101 +28,77 @@
+ 
+ #include <gst/gst.h>
+ #include <gst/video/video.h>
+-#include <vdec.h>
+ #include <gst/allocators/gstdmabuf.h>
+ 
+ G_BEGIN_DECLS
+ 
+-/* ---------------------------------------------------------------------*/
+-/* GstSpmSystemoMemory                                                  */
+-/* ---------------------------------------------------------------------*/
+-
+-#define GST_TYPE_SPACEMIT_ALLOCATOR	\
+-   (gst_spacemit_allocator_get_type())
+-#define GST_IS_SPACEMIT_ALLOCATOR(obj)				\
+-   (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_SPACEMIT_ALLOCATOR))
+-#define GST_IS_SPACEMIT_ALLOCATOR_CLASS(klass)			\
+-   (G_TYPE_CHECK_CLASS_TYPE ((klass), GST_TYPE_SPACEMIT_ALLOCATOR))
+-#define GST_SPACEMIT_ALLOCATOR_GET_CLASS(obj)			\
+-   (G_TYPE_INSTANCE_GET_CLASS ((obj), GST_TYPE_SPACEMIT_ALLOCATOR, GstSpaceMitAllocatorClass))
+-#define GST_SPACEMIT_ALLOCATOR(obj)				\
+-   (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_SPACEMIT_ALLOCATOR, GstSpaceMitAllocator))
+-#define GST_SPACEMIT_ALLOCATOR_CLASS(klass)			\
+-   (G_TYPE_CHECK_CLASS_CAST ((klass), GST_TYPE_SPACEMIT_ALLOCATOR, GstSpaceMitAllocatorClass))
+-
+-typedef struct _GstSpaceMitAllocator GstSpaceMitAllocator;
+-typedef struct _GstSpaceMitAllocatorClass GstSpaceMitAllocatorClass;
+-typedef struct _GstSpaceMitMemory GstSpaceMitMemory;
+-
+-typedef enum _GstSpmMemoryType
+-{
+-  GST_SPM_MEMORY_TYPE_SYSTEM,
+-  GST_SPM_MEMORY_TYPE_DMABUF,
+-} GstSpmMemoryType;
+-
+-struct _GstSpaceMitMemory
++#define GST_TYPE_SPACEMIT_DEC_ALLOCATOR	\
++   (gst_spacemit_dec_allocator_get_type())
++#define GST_IS_SPACEMIT_DEC_ALLOCATOR(obj)				\
++   (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_SPACEMIT_DEC_ALLOCATOR))
++#define GST_IS_SPACEMIT_DEC_ALLOCATOR_CLASS(klass)			\
++   (G_TYPE_CHECK_CLASS_TYPE ((klass), GST_TYPE_SPACEMIT_DEC_ALLOCATOR))
++#define GST_SPACEMIT_DEC_ALLOCATOR_GET_CLASS(obj)			\
++   (G_TYPE_INSTANCE_GET_CLASS ((obj), GST_TYPE_SPACEMIT_DEC_ALLOCATOR, GstSpaceMitDecAllocatorClass))
++#define GST_SPACEMIT_DEC_ALLOCATOR(obj)				\
++   (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_SPACEMIT_DEC_ALLOCATOR, GstSpaceMitDecAllocator))
++#define GST_SPACEMIT_DEC_ALLOCATOR_CLASS(klass)			\
++   (G_TYPE_CHECK_CLASS_CAST ((klass), GST_TYPE_SPACEMIT_DEC_ALLOCATOR, GstSpaceMitDecAllocatorClass))
++
++typedef struct _GstSpaceMitDecAllocator GstSpaceMitDecAllocator;
++typedef struct _GstSpaceMitDecAllocatorClass GstSpaceMitDecAllocatorClass;
++typedef struct _GstSpaceMitDecMemory GstSpaceMitDecMemory;
++
++// typedef enum _GstSpmMemoryType
++// {
++//   GST_SPM_MEMORY_TYPE_SYSTEM,
++//   GST_SPM_MEMORY_TYPE_DMABUF,
++// } GstSpmMemoryType;
++
++struct _GstSpaceMitDecMemory
+ {
+   GstMemory parent;
+ 
+-  gboolean acquired;
+-  MppFrame *mppframe;
+-  gpointer ptr;
++//   gboolean acquired;
++//   MppFrame *mppframe;
++//   gpointer ptr;
+ 
+-  MppVdecCtx *ctx;
+-  guint32 memsize;
+-  gint32 mppframe_id;
+-  GstMemory *foreign_mem;
++//   MppVdecCtx *ctx;
++//   guint32 memsize;
++//   gint32 mppframe_id;
++//   GstMemory *foreign_mem;
+ 
+-  guint32 fd;
+-  /* the original dispose function of foreign_mem */
+-  GstMiniObjectDisposeFunction foreign_dispose;
++//   guint32 fd;
++//   /* the original dispose function of foreign_mem */
++//   GstMiniObjectDisposeFunction foreign_dispose;
+ };
+ 
+-struct _GstSpaceMitAllocator
++struct _GstSpaceMitDecAllocator
+ {
+-  GstAllocator parent;
+-  gboolean active;
+-  GMutex lock;
+-
+-  GHashTable *memories;
+-  gint32 mppframe_id;
+-  gint32 dmabuf_fd;
+-  guint32 id;
+-  GstVideoInfo info;
+-  GstAllocator *foreign_allocator;
+-  GstSpmMemoryType mode;
+-  gboolean mem_back;
++  GstDmaBufAllocator parent;
++//   gboolean active;
++//   GMutex lock;
++
++//   GHashTable *memories;
++//   gint32 mppframe_id;
++//   gint32 dmabuf_fd;
++//   guint32 id;
++//   GstVideoInfo info;
++//   GstAllocator *foreign_allocator;
++//   GstSpmMemoryType mode;
++//   gboolean mem_back;
+ };
+ 
+-struct _GstSpaceMitAllocatorClass {
+-  GstAllocatorClass parent_class;
++struct _GstSpaceMitDecAllocatorClass {
++  GstDmaBufAllocatorClass parent_class;
+ };
+-GQuark gst_spm_dmabuf_memory_quark (void);
+-GQuark gst_spacemit_allocator_quark (void);
+-
+-#define GST_SPM_DMABUF_MEMORY_QUARK gst_spm_dmabuf_memory_quark ()
+-#define GST_SPACEMIT_ALLOCATOR_QUARK gst_spacemit_allocator_quark ()
+-
+-gboolean gst_is_spacemit_memory (GstMemory *mem);
+-GstAllocator *
+-gst_spacemit_allocator_new (void);
+-GstMemory *
+-gst_spacemit_allocator_alloc (GstSpaceMitAllocator * allocator, gsize size);
+-GstFlowReturn
+-gst_spacemit_allocator_acquire (GstAllocator * base_allocator, GstMemory ** memory);
+-gboolean
+-gst_spacemit_allocator_configure(GstAllocator * base_allocator, GstVideoInfo * info,  gboolean use_dmabuf);
+-gboolean
+-gst_spacemit_allocator_set_active (GstSpaceMitAllocator * allocator, gboolean active);
+-
+-void
+-gst_spacemit_allocator_get_info (GstAllocator * base_allocator, gint32 id, gint32 fd);
+-void
+-gst_spacemit_set_mem (GstMemory * base_mem, MppFrame *mppframe, MppVdecCtx *ctx);
+-gboolean
+-gst_spacemit_allocator_wait_inactive (GstAllocator * base_allocator);
+-
+-GType gst_spacemit_allocator_get_type (void) G_GNUC_CONST;
++GQuark gst_spacemit_dec_dmabuf_memory_quark (void);
++
++#define GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK gst_spacemit_dec_dmabuf_memory_quark ()
++
++GstAllocator *gst_spacemit_dec_allocator_new (void);
++
++GType gst_spacemit_dec_allocator_get_type (void);
+ 
+ G_END_DECLS
+ 
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c b/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c
+deleted file mode 100755
+index 771afe2..0000000
+--- a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.c
++++ /dev/null
+@@ -1,344 +0,0 @@
+-/* GStreamer
+- * Copyright (C) <2005> Julien Moutte <julien@moutte.net>
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Library General Public
+- * License as published by the Free Software Foundation; either
+- * version 2 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Library General Public License for more details.
+- *
+- * You should have received a copy of the GNU Library General Public
+- * License along with this library; if not, write to the
+- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+- * Boston, MA 02110-1301, USA.
+- */
+-
+-#ifdef HAVE_CONFIG_H
+-#include "config.h"
+-#endif
+-
+-/* Debugging category */
+-#include <gst/gstinfo.h>
+-#include "gstspacemitbufferpool.h"
+-#include "gstspacemitallocator.h"
+-
+-/* Helper functions */
+-#include <gst/video/video.h>
+-#include <gst/video/gstvideometa.h>
+-#include <gst/video/gstvideopool.h>
+-#include <gst/gstbufferpool.h>
+-
+-#define GST_CAT_DEFAULT gst_spacemitbufferpool_debug_category
+-GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
+-
+-/* bufferpool */
+-static void gst_spacemit_buffer_pool_finalize (GObject * object);
+-#define gst_spacemit_buffer_pool_parent_class parent_class
+-
+-G_DEFINE_TYPE_WITH_CODE (GstSpaceMitBufferPool, gst_spacemit_buffer_pool,
+-    GST_TYPE_BUFFER_POOL,
+-    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitbufferpool", 0,
+-        "spacemit buffer pool"));
+-
+-static gboolean
+-gst_spacemit_buffer_pool_start (GstBufferPool * base_pool)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL (base_pool);
+-  gboolean ret;
+-
+-  GST_DEBUG ("ZRong  ------------------------af pool start.(%d)", ret);
+-
+-  gst_spacemit_allocator_set_active (pool->allocator, TRUE);
+-
+-  ret = GST_BUFFER_POOL_CLASS (gst_spacemit_buffer_pool_parent_class)->start (base_pool);
+-
+-  return ret;
+-}
+-
+-static gboolean
+-gst_spacemit_buffer_pool_stop (GstBufferPool * base_pool)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL_CAST (base_pool);
+-
+-  GST_DEBUG_OBJECT (pool, "deactivating spacemit allocator");
+-  gst_spacemit_allocator_set_active (pool->allocator, FALSE);
+-
+-  if (pool->caps)
+-    gst_caps_unref (pool->caps);
+-  pool->caps = NULL;
+-
+-//  pool->add_videometa = FALSE;
+-//  pool->deactivated = TRUE;
+-
+-  return GST_BUFFER_POOL_CLASS (parent_class)->stop (base_pool);
+-}
+-
+-static const gchar **
+-gst_spacemit_buffer_pool_get_options (GstBufferPool * base_pool)
+-{
+-  static const gchar *options[] = { GST_BUFFER_POOL_OPTION_VIDEO_META,
+-    NULL
+-  };
+-  return options;
+-}
+-
+-static inline GstSpmMemoryType
+-_spm_get_memory_type (GstStructure * config)
+-{
+-  gboolean video, dmabuf;
+-
+-  dmabuf = gst_buffer_pool_config_has_option (config,
+-      GST_BUFFER_POOL_OPTION_SPM_USE_DMABUF);
+-
+-  if (dmabuf)
+-    return GST_SPM_MEMORY_TYPE_DMABUF;
+-  else
+-    return GST_SPM_MEMORY_TYPE_SYSTEM;
+-}
+-
+-static gboolean
+-gst_spacemit_buffer_pool_set_config (GstBufferPool * base_pool, GstStructure * config)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL_CAST (base_pool);
+-  GstVideoInfo info;
+-  GstCaps *caps;
+-  guint size, min_buffers, max_buffers;
+-  GstAllocator *allocator;
+-  GstAllocationParams params;
+-  GstStructure *fake_config;
+-  gboolean ret;
+-
+-  GST_DEBUG ("ZRong -------------------- in spacemit bufferpool set_config");
+-
+-  if (!gst_buffer_pool_config_get_params (config, &caps, &size, &min_buffers,
+-          &max_buffers))
+-    goto wrong_config;
+-
+-  if (caps == NULL)
+-    goto no_caps;
+-
+-  /* now parse the caps from the config */
+-  if (!gst_video_info_from_caps (&info, caps))
+-    goto wrong_caps;
+-
+-  if (!gst_buffer_pool_config_get_allocator (config, &allocator, &params))
+-    goto wrong_config;
+-
+-  /* enable metadata based on config of the pool */
+-  pool->add_videometa =
+-      gst_buffer_pool_config_has_option (config,
+-      GST_BUFFER_POOL_OPTION_VIDEO_META);
+-
+-  if (pool->caps)
+-    gst_caps_unref (pool->caps);
+-  pool->caps = gst_caps_ref (caps);
+-
+-  gst_buffer_pool_config_set_params (config, caps, size, min_buffers, max_buffers);
+-  pool->memory_type = _spm_get_memory_type (config);
+-
+-  /* give a fake config to the parent default_set_config() with size == 0
+-   * this prevents default_release_buffer() from free'ing the buffers, since
+-   * we release them with no memory */
+-  fake_config = gst_structure_copy (config);
+-  gst_buffer_pool_config_set_params (fake_config, caps, 0, min_buffers, max_buffers);
+-
+-  if (pool->allocator)
+-    gst_object_unref (pool->allocator);
+-
+-  pool->allocator = gst_object_ref (allocator);
+-  pool->info = info;
+-  pool->params = params;
+-
+-  ret = GST_BUFFER_POOL_CLASS (parent_class)->set_config (base_pool, fake_config);
+-  gst_structure_free (fake_config);
+-
+-  return ret;
+-
+-/* ERRORS */
+-wrong_config:
+-  {
+-    GST_WARNING_OBJECT (pool, "invalid config");
+-    return FALSE;
+-  }
+-no_caps:
+-  {
+-    GST_WARNING_OBJECT (pool, "no caps in config");
+-    return FALSE;
+-  }
+-
+-wrong_caps:
+-  {
+-    GST_WARNING_OBJECT (pool,
+-        "failed getting geometry from caps %" GST_PTR_FORMAT, caps);
+-    return FALSE;
+-  }
+-}
+-static void
+-gst_spacemit_buffer_pool_reset_buffer (GstBufferPool * base_pool, GstBuffer * buffer)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL_CAST (base_pool);
+-  guint n;
+-  guint size;
+-
+-  n = gst_buffer_n_memory (buffer);
+-  size = gst_buffer_get_size (buffer);
+-
+-  GST_DEBUG ("ZRong omx ------------------------ reset buffer.(%d)", size);
+-
+-  if (G_UNLIKELY (n != 1)) {
+-    GST_ERROR_OBJECT (pool, "Released buffer does not have 1 memory... "
+-        "(n = %u) something went terribly wrong", n);
+-  }
+-
+-  /* rip the memory out of the buffer;
+-   * we like to keep them separate in this pool.
+-   * if this was the last ref count of the memory, it will be returned
+-   * to the allocator, otherwise it will be returned later */
+-  gst_buffer_remove_all_memory (buffer);
+-
+-  /* reset before removing the TAG_MEMORY flag so that the parent impl
+-   * doesn't try to restore the original buffer size */
+-  GST_BUFFER_POOL_CLASS (parent_class)->reset_buffer
+-      (base_pool, buffer);
+-  n = gst_buffer_n_memory (buffer);
+-  size = gst_buffer_get_size (buffer);
+-
+-  GST_DEBUG ("ZRong omx ------------------------ reset buffer.(%d %d)", n, size);
+-
+-  /* pretend nothing happened to the memory to avoid discarding the buffer */
+-  GST_MINI_OBJECT_FLAG_UNSET (buffer, GST_BUFFER_FLAG_TAG_MEMORY);
+-}
+-
+-static GstFlowReturn
+-gst_spacemit_buffer_pool_alloc_buffer (GstBufferPool * base_pool, GstBuffer ** buffer,
+-    GstBufferPoolAcquireParams * params)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL_CAST (base_pool);
+-  GstVideoInfo *info;
+-  GstBuffer *buf;
+-  GstMemory *mem;
+-
+-  info = &pool->info;
+-  GST_DEBUG_OBJECT (pool, "ZRong -------------------- in spacemit bufferpool alloc (%d)", info->size);
+-  buf = gst_buffer_new ();
+-
+-  if (pool->add_videometa) {
+-    GST_DEBUG_OBJECT (pool, "adding GstVideoMeta");
+-    GstVideoMeta *meta;
+-
+-    meta = gst_buffer_add_video_meta_full (buf, GST_VIDEO_FRAME_FLAG_NONE,
+-        GST_VIDEO_INFO_FORMAT (info),
+-        GST_VIDEO_INFO_WIDTH (info), GST_VIDEO_INFO_HEIGHT (info),
+-        GST_VIDEO_INFO_N_PLANES (info), info->offset, info->stride);
+-    //gst_video_meta_set_alignment (meta, 0);
+-  }
+-
+-  *buffer = buf;
+-  GST_DEBUG ("ZRong -------------------- out spacemit bufferpool alloc");
+-
+-  return GST_FLOW_OK;
+-}
+-static GstFlowReturn
+-gst_spacemit_buffer_pool_acquire_buffer (GstBufferPool * base_pool,
+-    GstBuffer ** buffer, GstBufferPoolAcquireParams * params)
+-{
+-  GstFlowReturn ret;
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL (base_pool);
+-  GstMemory *mem;
+-
+-  GST_DEBUG ("ZRong -------------------- in acquire_buffer");
+-
+-  ret = GST_BUFFER_POOL_CLASS (parent_class)->acquire_buffer
+-      (base_pool, buffer, params);
+-  if (ret != GST_FLOW_OK)
+-    return ret;
+-
+-//  if (pool->memory_type == GST_SPM_MEMORY_TYPE_SYSTEM)
+-  GST_DEBUG ("ZRong ----------- in acquire_buffer, bf allocator_acquire");
+-
+-    ret = gst_spacemit_allocator_acquire (pool->allocator, &mem);
+-//  else
+-//    ret = gst_spm_dmabuf_allocator_acquire (pool->allocator, &mem);
+-
+-  if (ret != GST_FLOW_OK)
+-    return ret;
+-
+-  gst_buffer_append_memory (*buffer, mem);
+-
+-  return ret;
+-}
+-
+-static void
+-gst_spacemit_buffer_pool_release_buffer (GstBufferPool * base_pool, GstBuffer * buffer)
+-{
+-  guint n;
+-  gsize size, len;
+-
+-  n = gst_buffer_n_memory (buffer);
+-  len = n;
+-  size = gst_buffer_get_size (buffer);
+-  GST_DEBUG ("ZRong ------------------------ release buffer.(%d, %d, %d)", n, len, size);
+-
+-  GST_BUFFER_POOL_CLASS (parent_class)->release_buffer(base_pool, buffer);
+-}
+-GstBufferPool *
+-gst_spacemit_buffer_pool_new (void)
+-{
+-  GstSpaceMitBufferPool *pool;
+-  
+-  pool = g_object_new (GST_TYPE_SPACEMIT_BUFFER_POOL, NULL);
+-
+-  GST_DEBUG_OBJECT (pool, "ZRong new spacemit buffer pool %p", pool);
+-  
+-  return GST_BUFFER_POOL (pool);
+-}
+-
+-static void
+-gst_spacemit_buffer_pool_finalize (GObject * object)
+-{
+-  GstSpaceMitBufferPool *pool = GST_SPACEMIT_BUFFER_POOL (object);
+-  GST_DEBUG_OBJECT (pool, "start pool finalize.");
+-
+-  if (pool->allocator) {
+-    GST_DEBUG_OBJECT (pool, "pool allocator refcount: (%d %d)",
+-      GST_OBJECT_REFCOUNT_VALUE(pool->allocator), GST_OBJECT_REFCOUNT(pool->allocator));
+-
+-    gst_object_unref (pool->allocator);
+-  }
+-  pool->allocator = NULL;
+-
+-  if (pool->caps)
+-    gst_caps_unref (pool->caps);
+-  pool->caps = NULL;
+-
+-  G_OBJECT_CLASS (parent_class)->finalize (object);
+-}
+-
+-static void
+-gst_spacemit_buffer_pool_class_init (GstSpaceMitBufferPoolClass * klass)
+-{
+-  GObjectClass *gobject_class = (GObjectClass *) klass;
+-  GstBufferPoolClass *gstbufferpool_class = (GstBufferPoolClass *) klass;
+-
+-  gobject_class->finalize = gst_spacemit_buffer_pool_finalize;
+-
+-  gstbufferpool_class->start = gst_spacemit_buffer_pool_start;
+-  gstbufferpool_class->stop = gst_spacemit_buffer_pool_stop;
+-  gstbufferpool_class->get_options = gst_spacemit_buffer_pool_get_options;
+-  gstbufferpool_class->set_config = gst_spacemit_buffer_pool_set_config;
+-  gstbufferpool_class->alloc_buffer = gst_spacemit_buffer_pool_alloc_buffer;
+-  gstbufferpool_class->reset_buffer = gst_spacemit_buffer_pool_reset_buffer;
+-
+-  gstbufferpool_class->acquire_buffer = gst_spacemit_buffer_pool_acquire_buffer;
+-  gstbufferpool_class->release_buffer = gst_spacemit_buffer_pool_release_buffer;
+-}
+-
+-static void
+-gst_spacemit_buffer_pool_init (GstSpaceMitBufferPool * pool)
+-{
+-}
+-
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.h b/ext/spacemit/spacemitcodec/gstspacemitbufferpool.h
+deleted file mode 100755
+index 1b40b68..0000000
+--- a/ext/spacemit/spacemitcodec/gstspacemitbufferpool.h
++++ /dev/null
+@@ -1,72 +0,0 @@
+-/* GStreamer
+- * Copyright (C) <2005> Julien Moutte <julien@moutte.net>
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Library General Public
+- * License as published by the Free Software Foundation; either
+- * version 2 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Library General Public License for more details.
+- *
+- * You should have received a copy of the GNU Library General Public
+- * License along with this library; if not, write to the
+- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+- * Boston, MA 02110-1301, USA.
+- */
+-
+-#ifndef __GST_SPACEMITPOOL_H__
+-#define __GST_SPACEMITPOOL_H__
+-
+-#include <string.h>
+-#include <math.h>
+-#include <gst/gst.h>
+-#include <gst/video/video.h>
+-
+-#include "gstspacemitallocator.h"
+-
+-G_BEGIN_DECLS
+-
+-typedef struct _GstSpaceMitBufferPool GstSpaceMitBufferPool;
+-typedef struct _GstSpaceMitBufferPoolClass GstSpaceMitBufferPoolClass;
+-
+-/* buffer pool functions */
+-#define GST_TYPE_SPACEMIT_BUFFER_POOL      (gst_spacemit_buffer_pool_get_type())
+-#define GST_IS_SPACEMIT_BUFFER_POOL(obj)   (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_SPACEMIT_BUFFER_POOL))
+-#define GST_SPACEMIT_BUFFER_POOL(obj)      (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_SPACEMIT_BUFFER_POOL, GstSpaceMitBufferPool))
+-#define GST_SPACEMIT_BUFFER_POOL_CAST(obj) ((GstSpaceMitBufferPool*)(obj))
+-
+-struct _GstSpaceMitBufferPool
+-{
+-  GstVideoBufferPool parent;
+-
+-  GstAllocator *allocator;
+-
+-  GstCaps *caps;
+-  GstVideoInfo info;
+-  GstVideoAlignment align;
+-  guint    padded_width;
+-  guint    padded_height;
+-  gboolean add_videometa;
+-  gboolean add_metavideo;
+-  gboolean need_alignment;
+-  GstAllocationParams params;
+-
+-  GstSpmMemoryType memory_type;
+-};
+-
+-struct _GstSpaceMitBufferPoolClass
+-{
+-  GstVideoBufferPoolClass parent_class;
+-};
+-#define GST_BUFFER_POOL_OPTION_SPM_USE_DMABUF "GstBufferPoolOptionSpmUseDMABuf"
+-
+-GType gst_spacemit_buffer_pool_get_type (void);
+-
+-GstBufferPool * gst_spacemit_buffer_pool_new     (void);
+-
+-G_END_DECLS
+-
+-#endif /* __GST_SPACEMITPOOL_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.c b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+index 8c170e5..cc0c7ca 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+@@ -44,7 +44,6 @@ static gboolean gst_spacemitdec_close(GstVideoDecoder *decoder);
+ static gboolean gst_spacemitdec_start(GstVideoDecoder *decoder);
+ static gboolean gst_spacemitdec_stop(GstVideoDecoder *decoder);
+ static gboolean gst_spacemitdec_set_format(GstVideoDecoder *decoder, GstVideoCodecState *state);
+-static gboolean gst_spacemitdec_reset(GstVideoDecoder *decoder, gboolean hard);
+ static gboolean gst_spacemitdec_flush(GstVideoDecoder * decoder);
+ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder *decoder);
+ static GstFlowReturn gst_spacemitdec_handle_frame(GstVideoDecoder *decoder, GstVideoCodecFrame *frame);
+@@ -74,8 +73,8 @@ GST_STATIC_PAD_TEMPLATE ("sink",
+     "parsed = (boolean) true,"
+     "systemstream = (boolean) false"
+     ";"
+-//    "image/jpeg"
+-//    ";"
++    "image/jpeg"
++    ";"
+     "video/x-vp8"
+     ";"
+     "video/x-vp9"
+@@ -162,17 +161,6 @@ static gboolean gst_spacemitdec_close(GstVideoDecoder * decoder)
+     thiz->input_state = NULL;
+   }
+ 
+-  if (thiz->pool) {
+-    GST_DEBUG_OBJECT (decoder, "start pool set active: false(%d, %d)",
+-      GST_MINI_OBJECT_REFCOUNT_VALUE(thiz->pool),
+-      GST_MINI_OBJECT_REFCOUNT_VALUE(GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator));
+-
+-    gst_buffer_pool_set_active (thiz->pool, FALSE);
+-    gst_spacemit_allocator_wait_inactive (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator);
+-    gst_object_unref (thiz->pool);
+-    thiz->pool = NULL;
+-  }
+-
+   GST_DEBUG_OBJECT (decoder, "finish close");
+ 
+ 	return TRUE;
+@@ -200,14 +188,13 @@ static void gst_spacemitdec_class_init(GstSpacemitDecClass * klass)
+   video_decoder_class->start = GST_DEBUG_FUNCPTR(gst_spacemitdec_start);
+   video_decoder_class->stop = GST_DEBUG_FUNCPTR(gst_spacemitdec_stop);
+   video_decoder_class->set_format = GST_DEBUG_FUNCPTR(gst_spacemitdec_set_format);
+-//  video_decoder_class->reset = GST_DEBUG_FUNCPTR(gst_spacemitdec_reset);
+   video_decoder_class->flush = GST_DEBUG_FUNCPTR (gst_spacemitdec_flush);
+   video_decoder_class->finish = GST_DEBUG_FUNCPTR(gst_spacemitdec_finish);
+   video_decoder_class->handle_frame = GST_DEBUG_FUNCPTR(gst_spacemitdec_handle_frame);
+   video_decoder_class->decide_allocation = GST_DEBUG_FUNCPTR(gst_spacemitdec_decide_allocation);
+   video_decoder_class->parse = gst_spacemitdec_parse;
+ 
+-//  element_class->change_state = GST_DEBUG_FUNCPTR (gst_spacemitdec_dec_change_state);
++  element_class->change_state = GST_DEBUG_FUNCPTR (gst_spacemitdec_dec_change_state);
+ 
+   /* define properties */
+   g_object_class_install_property (gobject_class, PROP_CODE_TYPE,
+@@ -225,11 +212,6 @@ static void gst_spacemitdec_class_init(GstSpacemitDecClass * klass)
+           "Decode the generated yuv format",
+           PIXEL_FORMAT_UNKNOWN, PIXEL_FORMAT_MAX - 1, PIXEL_FORMAT_I420,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+-  g_object_class_install_property (gobject_class, PROP_CLOSE_DMABUF,
+-      g_param_spec_boolean ("close-dmabuf", "close dmabuf",
+-          "Close Dmabuf feature", FALSE,
+-          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+-
+   g_object_class_install_property (gobject_class, PROP_SAVE_DEC_IMAGE,
+       g_param_spec_boolean ("save-dec-images", "save dec images",
+           "save dec image to /tmp/", FALSE,
+@@ -240,6 +222,8 @@ static void gst_spacemitdec_init (GstSpacemitDec * thiz)
+ {
+   GstVideoDecoder *decoder = GST_VIDEO_DECODER (thiz);
+ 
++  GST_DEBUG_OBJECT (thiz, "start init");
++
+   thiz->pool = NULL;
+   thiz->ctx = NULL;
+   thiz->width = 1280;
+@@ -247,7 +231,6 @@ static void gst_spacemitdec_init (GstSpacemitDec * thiz)
+   thiz->eCodecType = CODEC_V4L2_LINLONV5V7;
+   thiz->eCodingType = CODING_H264;
+   thiz->downscale = 1;
+-  thiz->use_dmabuf = TRUE;
+   thiz->eOutputPixelFormat = PIXEL_FORMAT_NV12;
+   thiz->dec_nonblock = TRUE;
+   thiz->req_nonblock = TRUE;
+@@ -272,9 +255,6 @@ gst_spacemitdec_set_property (GObject * object, guint property_id,
+     case PROP_CODE_YUV_FORMAT:
+       thiz->eOutputPixelFormat = g_value_get_uint (value);
+       break;
+-    case PROP_CLOSE_DMABUF:
+-      thiz->use_dmabuf = FALSE;
+-      break;
+     case PROP_SAVE_DEC_IMAGE:
+       thiz->save_dec = g_value_get_boolean (value);
+       break;
+@@ -302,9 +282,6 @@ gst_spacemitdec_get_property (GObject * object, guint property_id,
+     case PROP_CODE_YUV_FORMAT:
+       g_value_set_uint (value, thiz->eOutputPixelFormat);
+       break;
+-    case PROP_CLOSE_DMABUF:
+-      g_value_set_boolean (value, thiz->use_dmabuf);
+-      break;
+     case PROP_SAVE_DEC_IMAGE:
+       g_value_set_boolean (value, thiz->save_dec);
+       break;
+@@ -331,7 +308,7 @@ gst_spacemitdec_finalize (GObject * object)
+ 
+   G_OBJECT_CLASS (gst_spacemitdec_parent_class)->finalize (object);
+ }
+-
++MppVdecCtx *gctx = NULL;
+ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC (decoder);
+@@ -339,22 +316,7 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+ 
+   GST_DEBUG_OBJECT (thiz, "in start !");
+ 
+-	if (thiz->ctx)
+-	{
+-		VDEC_DestoryChannel (thiz->ctx);
+-		thiz->ctx = NULL;
+-	}
+-	thiz->ctx = VDEC_CreateChannel ();
+-  thiz->ctx->eCodecType = thiz->eCodecType;
+-
+-	thiz->mpppacket = PACKET_Create ();
+-	if (!thiz->mpppacket) {
+-    GST_ERROR_OBJECT (thiz, "can not alloc for mpp structure, please check !");
+-    return FALSE;
+-  }
+-
+   thiz->mppframe = NULL;
+-  thiz->at_eos = FALSE;
+   thiz->downstream_flow_ret = GST_FLOW_OK;
+   thiz->cur_frame_number = -1;
+   thiz->initialized = FALSE;
+@@ -364,6 +326,16 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+   thiz->saw_header = FALSE;
+   thiz->parse_entropy_len = 0;
+   thiz->parse_resync = FALSE;
++
++  thiz->ctx = VDEC_CreateChannel ();
++  gctx = thiz->ctx;
++  thiz->mpppacket = PACKET_Create ();
++  if (!thiz->mpppacket) {
++    GST_ERROR_OBJECT (thiz, "can not alloc for mpp structure, please check !");
++    return FALSE;
++  }
++  thiz->ctx->eCodecType = thiz->eCodecType;
++
+   GST_DEBUG_OBJECT (thiz, "finish start ! (%d)", thiz->save_dec);
+ 
+ 	return TRUE;
+@@ -372,6 +344,7 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
++  gboolean wait_ret = TRUE;
+ 
+   GST_DEBUG_OBJECT (thiz, "start finish stop");
+ 
+@@ -383,18 +356,18 @@ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+   thiz->saw_header = FALSE;
+ 
+   VDEC_DestoryChannel (thiz->ctx);
+-  thiz->ctx = NULL;
++  thiz->ctx = gctx = NULL;
+ 
+   PACKET_Destory(thiz->mpppacket);
+   thiz->mpppacket = NULL;
+ 
+   if (!(gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED)) {
+-    GST_DEBUG_OBJECT (thiz, "finish stop");
++    GST_DEBUG_OBJECT (thiz, "finish stop, mem back %d", wait_ret);
+     return TRUE;
+   }
+ 
+   gst_pad_stop_task (decoder->srcpad);
+-  GST_DEBUG_OBJECT (thiz, "finish stop222");
++  GST_DEBUG_OBJECT (thiz, "finish stop222, mem back %d", wait_ret);
+ 
+ 	return TRUE;
+ }
+@@ -464,7 +437,7 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+     thiz->ctx->stVdecPara.nWidth = thiz->width;
+     thiz->ctx->stVdecPara.nHeight = thiz->height;
+     thiz->ctx->stVdecPara.eOutputPixelFormat = thiz->eOutputPixelFormat;
+-    thiz->ctx->eCodecType = thiz->eCodecType; //set property
++    thiz->ctx->eCodecType = thiz->eCodecType;
+     thiz->ctx->stVdecPara.nScale = thiz->downscale;
+     thiz->ctx->stVdecPara.nHorizonScaleDownRatio = 1;
+     thiz->ctx->stVdecPara.nVerticalScaleDownRatio = 1;
+@@ -516,7 +489,11 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+ 
+   if (thiz->eCodingType == CODING_MJPEG) {
+     structure = gst_caps_get_structure (state->caps, 0);
+-    gst_structure_get_boolean (structure, "parsed", &parsed);
++
++    if (gst_structure_has_field(structure, "parsed"))
++      gst_structure_get_boolean (structure, "parsed", &parsed);
++    else
++      parsed = TRUE;
+     gst_video_decoder_set_packetized (thiz, parsed);
+   }
+ 	GST_DEBUG_OBJECT (thiz, "set format finish (%d, %d, %d), (%d, %d, %d)",
+@@ -528,31 +505,22 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+ 	return TRUE;
+ }
+ 
+-static gboolean gst_spacemitdec_reset(GstVideoDecoder * decoder, gboolean hard)
+-{
+-	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+-
+-	GST_ERROR_OBJECT (thiz, "ZRong ------------------------- finish reset!");
+-
+-	return TRUE;
+-}
+ static gboolean
+ gst_spacemitdec_flush (GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+ 
+-  GST_DEBUG_OBJECT (thiz, "start flush, (%d)", thiz->downstream_flow_ret);
++  GST_DEBUG_OBJECT (thiz, "sstart flush, (%d)", thiz->downstream_flow_ret);
+ 
+   thiz->flushing = TRUE;
+ 
+-  if (thiz->downstream_flow_ret == GST_FLOW_EOS) {
+-    gst_spacemit_allocator_wait_inactive (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator);
+-
+-    if (thiz->eCodecType != CODEC_V4L2_LINLONV5V7)
+-      VDEC_Flush(thiz->ctx);
+-    else
+-      VDEC_ResetChannel(thiz->ctx);
+-  }
++  VDEC_ResetChannel(thiz->ctx);
++  // if (thiz->downstream_flow_ret == GST_FLOW_EOS) {
++  //   if (thiz->eCodecType != CODEC_V4L2_LINLONV5V7)
++  //     VDEC_Flush(thiz->ctx);
++  //   else
++  //     VDEC_ResetChannel(thiz->ctx);
++  // }
+ 
+   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+ 
+@@ -674,6 +642,14 @@ save_decoder_images_for_test (GstVideoDecoder * decoder, GstBuffer *outbuf)
+ 
+   return GST_FLOW_OK;
+ }
++static void
++dma_memory_release (void *data)
++{
++  MppFrame * mppframe = (MppFrame *) data;
++  GST_DEBUG ("release a mppframe id:%d fd:%d", FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0));
++  VDEC_ReturnOutputFrame(gctx, FRAME_GetBaseData(mppframe));
++  FRAME_Destory(mppframe);
++}
+ 
+ static GstFlowReturn
+ gst_spacemitdec_fill_output_buffer (GstVideoDecoder * decoder,
+@@ -686,27 +662,20 @@ gst_spacemitdec_fill_output_buffer (GstVideoDecoder * decoder,
+   GstMemory *mem;
+   gint32 id = -1;
+   gint32 fd = -1;
++  GstBuffer *newbuf;
+ 
+   id = FRAME_GetID(thiz->mppframe);
+-  if (thiz->use_dmabuf) {
+-    fd = FRAME_GetFD(thiz->mppframe, 0);
+-    gst_spacemit_allocator_get_info (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, id, fd);
+-  } else {
+-    gst_spacemit_allocator_get_info (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, id, -1);
+-  }
++  fd = FRAME_GetFD(thiz->mppframe, 0);
+   GST_DEBUG_OBJECT (thiz, "get mppframe id:%d fd:%d", id, fd);
+ 
+-  flow_status = gst_buffer_pool_acquire_buffer (thiz->pool, &outbuf, &params);
+-  if (flow_status != GST_FLOW_OK) {
+-    GST_ERROR_OBJECT (thiz,
+-        "can not acquire output buffer from pool: %" GST_PTR_FORMAT, thiz->pool);
+-     goto done;
+-  }
++  newbuf = gst_buffer_new ();
++  mem = gst_dmabuf_allocator_alloc_with_flags (thiz->allocator, fd,
++    thiz->width * thiz->height * 1.5, GST_FD_MEMORY_FLAG_DONT_CLOSE);
++  gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK, thiz->mppframe, dma_memory_release);
++  gst_buffer_append_memory (newbuf, mem);
+ 
+-  mem = gst_buffer_peek_memory (outbuf, 0);
+-  gst_spacemit_set_mem (mem, thiz->mppframe, thiz->ctx);
+-  *output_buffer = outbuf;
+-  GST_DEBUG_OBJECT (thiz, "finish buffer %p fill, mem:%p", outbuf, mem);
++  *output_buffer = newbuf;
++  GST_DEBUG_OBJECT (thiz, "finish buffer %p fill, mem:%p", newbuf, mem);
+ 
+   if (thiz->save_dec)
+     flow_status = save_decoder_images_for_test (decoder, outbuf);
+@@ -733,6 +702,10 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+     if (ret != MPP_CODER_NO_DATA) {
+       break;
+     } else {
++      if (GST_STATE (GST_ELEMENT (thiz)) == GST_STATE_PAUSED) {
++        GST_INFO_OBJECT (thiz, "spacemitdec element is in pause, exit request try");
++        return GST_STATE_PAUSED;
++      }
+       if (count >= 2 && count < MAX_POLL_TIME) {
+         g_usleep(500);
+       } else if (count >= MAX_POLL_TIME) {
+@@ -760,21 +733,26 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+   GstVideoCodecFrame * frame;
+   GstFlowReturn flow_status;
+   GstBuffer *outbuf = NULL;
+-  int mpp_ret;
++  int req_ret;
+ 
+   if (G_UNLIKELY(thiz->flushing))
+     goto flushing;
+ 
+-  mpp_ret = gst_spacemitdec_request_frame (thiz);
+-  if (mpp_ret == MPP_CODER_EOS) {
++  req_ret = gst_spacemitdec_request_frame (thiz);
++  if (req_ret == MPP_CODER_EOS) {
+     VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
+     FRAME_Destory(thiz->mppframe);
+     goto finish_work;
+-  } else if  (mpp_ret == MPP_POLL_FAILED) {
++  } else if  (req_ret == MPP_POLL_FAILED) {
+     thiz->downstream_flow_ret = GST_FLOW_ERROR;
+     FRAME_Destory(thiz->mppframe);
+     goto done;
+-  } else if (mpp_ret == MPP_RESOLUTION_CHANGED) {
++  }  else if  (req_ret == GST_STATE_PAUSED) {
++    thiz->downstream_flow_ret = GST_FLOW_OK;
++    GST_INFO_OBJECT (thiz,  "pause task in dec loop (%d)!", thiz->downstream_flow_ret);
++    gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (thiz));
++    goto done;
++  } else if (req_ret == MPP_RESOLUTION_CHANGED) {
+     if (thiz->width != thiz->ctx->stVdecPara.nWidth &&
+         thiz->height != thiz->ctx->stVdecPara.nHeight) {
+       GST_DEBUG_OBJECT (thiz, "resolution change from (%u, %u) to (%u, %u), need renegotiate",
+@@ -788,8 +766,8 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+       FRAME_Destory(thiz->mppframe);
+       goto no_frame;
+     }
+-  } else if (mpp_ret != MPP_OK)  {
+-    GST_WARNING_OBJECT (thiz, "other return(%d) form mpp, when get dec frame", mpp_ret);
++  } else if (req_ret != MPP_OK)  {
++    GST_WARNING_OBJECT (thiz, "other return(%d) form mpp, when get dec frame", req_ret);
+   }
+ 
+   if (thiz->wait_reschange) {
+@@ -798,11 +776,11 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+     goto no_frame;
+   }
+ 
+-  GST_DEBUG_OBJECT (thiz, "start get oldest frame. mpp_ret: %d", mpp_ret);
++  GST_DEBUG_OBJECT (thiz, "start get oldest frame. req_ret: %d", req_ret);
+ 
+   frame = gst_video_decoder_get_oldest_frame (decoder);
+   if (frame == NULL) {
+-    GST_DEBUG_OBJECT (thiz, "get null frame (%d)", mpp_ret);
++    GST_DEBUG_OBJECT (thiz, "get null frame (%d)", req_ret);
+     flow_status = gst_spacemitdec_fill_output_buffer (decoder, &outbuf);
+     if (flow_status != GST_FLOW_OK)
+       goto fill_buffer_err;
+@@ -892,7 +870,7 @@ fill_buffer_err:
+ 
+ finish_work:
+ {
+-  GST_DEBUG_OBJECT (thiz, "get eos(%d, %d), finish work and pause task!", mpp_ret, flow_status);
++  GST_DEBUG_OBJECT (thiz, "get eos(%d, %d), finish work and pause task!", req_ret, flow_status);
+   thiz->downstream_flow_ret = GST_FLOW_EOS;
+   goto done;
+ }
+@@ -904,72 +882,6 @@ error_flow:
+   goto done;
+ }
+ }
+-static gboolean
+-gst_spacemitdec_pool_set_active(GstVideoDecoder * decoder)
+-{
+-  GstSpacemitDec *thiz = GST_SPACEMITDEC (decoder);
+-  GstVideoCodecState *state;
+-  GstBufferPool *pool;
+-  guint size, min, max, i;
+-  GstStructure *config;
+-  GstCaps *caps = NULL;
+-  GstVideoInfo vinfo;
+-
+-  GST_ERROR_OBJECT (thiz, "start spacemitdec pool set active!");
+-
+-  pool = gst_video_decoder_get_buffer_pool (GST_VIDEO_DECODER (thiz));
+-  if (pool) {
+-    config = gst_buffer_pool_get_config (pool);
+-    if (!gst_buffer_pool_config_get_params (config, &caps, NULL, &min, &max)) {
+-      GST_ERROR_OBJECT (thiz, "can't get buffer pool params");
+-      gst_structure_free (config);
+-      return FALSE;
+-    }
+-    gst_structure_free (config);
+-    gst_object_unref (pool);
+-  }
+-
+-  if (caps) {
+-    thiz->pool = gst_spacemit_buffer_pool_new ();
+-    config = gst_buffer_pool_get_config (thiz->pool);
+-    gst_buffer_pool_config_add_option (config,
+-        GST_BUFFER_POOL_OPTION_VIDEO_META);
+-
+-    gst_video_info_init (&vinfo);
+-    gst_video_info_from_caps (&vinfo, caps);
+-    min = MAX (min, 8);
+-
+-    gst_buffer_pool_config_set_params (config, caps,
+-        vinfo.size, min, max);
+-    if (!gst_buffer_pool_set_config (thiz->pool, config)) {
+-      GST_ERROR_OBJECT (thiz, "failed to set config on spacemit pool");
+-      gst_object_unref (thiz->pool);
+-      thiz->pool = NULL;
+-      return FALSE;
+-    }
+-    if (!gst_buffer_pool_set_active (thiz->pool, TRUE)) {
+-      GST_ERROR_OBJECT (thiz, "failed to activate spacemit pool");
+-      gst_object_unref (thiz->pool);
+-      thiz->pool = NULL;
+-      return FALSE;
+-    }
+-    GST_DEBUG_OBJECT (thiz,
+-        "use spacemit bufferpool: %" GST_PTR_FORMAT, thiz->pool);
+-
+-    pool = gst_video_decoder_get_buffer_pool (decoder);
+-    if(!gst_buffer_pool_set_active (pool, FALSE))
+-      GST_ERROR_OBJECT (thiz, "failed to set acitve false on pool %" GST_PTR_FORMAT, pool);
+-    gst_object_unref (pool);
+-    gst_caps_unref (caps);
+-  } else {
+-    GST_ERROR_OBJECT (thiz, "can't get pool caps params");
+-    return FALSE;
+-  }
+-
+-  GST_DEBUG_OBJECT (thiz, "finish spacemitdec pool set active, ref count: %d", GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
+-
+-  return TRUE;
+-}
+ 
+ static gboolean
+ gst_spacemitdec_set_src_caps (GstSpacemitDec * thiz)
+@@ -994,18 +906,7 @@ gst_spacemitdec_set_src_caps (GstSpacemitDec * thiz)
+   vinfo = &output_state->info;
+   output_state->caps = gst_video_info_to_caps (vinfo);
+ 
+-  const gchar *user_dmabuf_choice;
+-
+-  user_dmabuf_choice = g_getenv ("GST_DMABUF_CHOICE");
+-  if (user_dmabuf_choice && g_strstr_len (user_dmabuf_choice, 1, "N")) {
+-    GST_DEBUG("GST_DMABUF_CHOICE is N, set use_dmabuf = false");
+-    thiz->use_dmabuf = FALSE;
+-  } else {
+-    GST_DEBUG("GST_DMABUF_CHOICE is Y, set use_dmabuf = true");
+-    thiz->use_dmabuf = TRUE;
+-  }
+-
+-  if (thiz->use_dmabuf && srcpad_can_dmabuf (thiz)) {
++  if (srcpad_can_dmabuf (thiz)) {
+     gst_caps_set_features (output_state->caps, 0,
+         gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+     GST_INFO_OBJECT (thiz, "set DMABUF feature to spacemitdec src cap %" GST_PTR_FORMAT, output_state->caps);
+@@ -1116,9 +1017,6 @@ gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
+ 
+     if (!gst_video_decoder_negotiate (decoder))
+       goto not_negotiated_err;
+-
+-    if (!gst_buffer_pool_set_active (thiz->pool, TRUE))
+-      goto acitve_fail;
+   }
+ 
+   if (G_UNLIKELY (!gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED) && !thiz->flushing) {
+@@ -1127,8 +1025,7 @@ gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
+         (GstTaskFunction) gst_spacemitdec_loop, decoder, NULL);
+   }
+ 
+-  GST_DEBUG_OBJECT (thiz, "finish dec handle, %d, pool refcount:%d",
+-    thiz->downstream_flow_ret, GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
++  GST_DEBUG_OBJECT (thiz, "finish dec handle, %d", thiz->downstream_flow_ret);
+   ret = thiz->downstream_flow_ret;
+ 
+ out:
+@@ -1147,15 +1044,6 @@ not_negotiated_err:
+   ret = GST_FLOW_NOT_NEGOTIATED;
+   goto out;
+ }
+-
+-acitve_fail:
+-{
+-  GST_ERROR_OBJECT (thiz, "acitve spacemit pool fail!");
+-  gst_object_unref (thiz->pool);
+-  ret = GST_FLOW_ERROR;
+-  goto out;
+-}
+-
+ map_err:
+ {
+   GST_ERROR_OBJECT (thiz, "Cannot map input buffer!");
+@@ -1389,20 +1277,14 @@ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder * decoder)
+   GST_DEBUG_OBJECT(thiz, "finish test1");
+ 
+   /* Drain all pending frames */
+-  //while ((gst_spacemitdec_handle_frame (decoder, NULL)) == GST_FLOW_OK);
+   flow_status = gst_spacemitdec_handle_frame (decoder, NULL);
+   if (flow_status != GST_FLOW_EOS) {
+       GST_ERROR_OBJECT(thiz, "stream no in eos, after setting null packet! (%d)", flow_status);
+       return GST_FLOW_ERROR;
+   }
+ 
+-  thiz->at_eos = TRUE;
+-
+   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+ 
+-  GST_DEBUG_OBJECT(thiz, "finish test222");
+-  gst_spacemit_allocator_wait_inactive (GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator);
+-
+   /* Wait for task thread to pause */
+   GstTask *task = decoder->srcpad->task;
+   if (task) {
+@@ -1423,69 +1305,6 @@ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder * decoder)
+   return GST_FLOW_OK;
+ }
+ 
+-static GstBufferPool *
+-gst_spacemitdec_create_buffer_pool (GstSpacemitDec * thiz, GstVideoInfo * info,
+-    guint num_buffers)
+-{
+-  GstBufferPool *pool = NULL;
+-  GstAllocator *allocator = NULL;
+-  GstStructure *config;
+-  GstCaps *caps = NULL;
+-  GstVideoAlignment align;
+-
+-  pool = gst_spacemit_buffer_pool_new ();
+-  if (!pool)
+-    goto error_no_pool;
+-
+-  allocator = gst_spacemit_allocator_new ();
+-  if (!allocator)
+-    goto error_no_allocator;
+-
+-  gst_spacemit_allocator_configure(allocator, info, thiz->use_dmabuf);
+-
+-  caps = gst_video_info_to_caps (info);
+-
+-  config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pool));
+-  gst_buffer_pool_config_set_params (config, caps,
+-      GST_VIDEO_INFO_SIZE (info), num_buffers, num_buffers);
+-  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+-  gst_buffer_pool_config_add_option (config,
+-      GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT);
+-  gst_caps_unref (caps);
+-
+-  if (thiz->use_dmabuf)
+-    gst_buffer_pool_config_add_option (config,
+-        GST_BUFFER_POOL_OPTION_SPM_USE_DMABUF);
+-
+-  gst_buffer_pool_config_set_video_alignment (config, &align);
+-  gst_buffer_pool_config_set_allocator (config, allocator, NULL);
+-  gst_object_unref (allocator);
+-
+-  if (!gst_buffer_pool_set_config (pool, config))
+-    goto error_pool_config;
+-
+-  return pool;
+-
+-error_no_pool:
+-  {
+-    GST_ERROR_OBJECT (thiz, "failed to create spacemitdec bufferpool");
+-    return NULL;
+-  }
+-error_no_allocator:
+-  {
+-    GST_ERROR_OBJECT (thiz, "failed to create allocator");
+-    gst_object_unref (pool);
+-    return NULL;
+-  }
+-error_pool_config:
+-  {
+-    GST_ERROR_OBJECT (thiz, "failed to set config");
+-    gst_object_unref (pool);
+-    gst_object_unref (allocator);
+-    return NULL;
+-  }
+-}
+-
+ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder * decoder, GstQuery * query)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+@@ -1516,92 +1335,11 @@ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder * decoder, Gst
+   gst_object_unref (pool);
+ 
+   if (_gst_caps_has_feature (caps, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+-    // GST_INFO_OBJECT (thiz, "the spacemit decoder uses DMABuf memory");
+-    thiz->use_dmabuf = TRUE;
+-  } else {
+-    thiz->use_dmabuf = FALSE;
++    GST_INFO_OBJECT (thiz, "the spacemit decoder uses DMABuf memory");
+   }
+ 
+-  i = 0;
+-  while (gst_query_get_n_allocation_pools (query) > 0) {
+-    gst_query_parse_nth_allocation_pool (query, 0, &pool, &size, &min, &max);
+-    GST_DEBUG_OBJECT (thiz, "%dth pool is %" GST_PTR_FORMAT, i, pool);
+-
+-    gst_query_remove_nth_allocation_pool (query, 0);
+-    if (pool)
+-      gst_object_unref (pool);
+-    pool = NULL;
+-    i++;
+-  }
+-
+-  i = 0;
+-  while (gst_query_get_n_allocation_params (query) > 0) {
+-    gst_query_parse_nth_allocation_param (query, 0, &allocator, &params);
+-    GST_DEBUG_OBJECT (thiz, "%dth allocator is %" GST_PTR_FORMAT, i, allocator);
+-
+-    gst_query_remove_nth_allocation_param (query, 0);
+-    if (allocator)
+-      gst_object_unref (allocator);
+-    allocator = NULL;
+-    i++;
+-  }
+-
+-  /* Decoder always use its own pool. */
+-  if (!thiz->pool) {
+-    output_state = gst_video_decoder_get_output_state (GST_VIDEO_DECODER (thiz));
+-
+-    gst_clear_object (&thiz->pool);
+-    num_buffers = (8 > min) ? 8 : min;
+-    GST_INFO_OBJECT (thiz, "create new spacemit bufferpool, DMABUF memory: %d, num: %d", thiz->use_dmabuf, num_buffers);
+-    thiz->pool = gst_spacemitdec_create_buffer_pool(thiz, &output_state->info, num_buffers);
+-    gst_video_codec_state_unref (output_state);
+-    if (!thiz->pool) {
+-      GST_ERROR_OBJECT (thiz, "failed to create new pool");
+-      goto failed_to_create_pool;
+-    }
+-
+-    gst_buffer_pool_config_set_params (pool_config, caps, size, num_buffers, num_buffers);
+-    gst_buffer_pool_config_set_allocator (pool_config, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
+-    gst_query_add_allocation_param (query, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
+-    gst_query_add_allocation_pool (query, thiz->pool, size, num_buffers, num_buffers);
+-  } else {
+-    gst_buffer_pool_config_set_params (pool_config, caps, size, num_buffers, num_buffers);
+-    gst_buffer_pool_config_set_allocator (pool_config, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
+-    gst_query_add_allocation_param (query, GST_SPACEMIT_BUFFER_POOL_CAST(thiz->pool)->allocator, &params);
+-    gst_query_add_allocation_pool (query, thiz->pool, size, num_buffers, num_buffers);
+-    // goto no_support;
+-    GST_WARNING_OBJECT (thiz, "spacemit pool had setup!");
+-  }
+-
+-  GST_DEBUG_OBJECT (thiz, "finish decide_allocation, spacemit pool ref:%d", GST_OBJECT_REFCOUNT_VALUE(thiz->pool));
+-
+-  /* If downstream supports video meta and video alignment,
+-   * we can replace with our own spacemit bufferpool and use it
+-   */
+-#if 0
+-  if (gst_buffer_pool_has_option (pool,
+-          GST_BUFFER_POOL_OPTION_VIDEO_META)) {
+-    GstStructure *config;
+-    GstAllocator *allocator;
+-
+-    /* Remove downstream's pool */
+-    gst_structure_free (pool_config);
+-    gst_object_unref (pool);
+-
+-    pool = gst_object_ref (spacemitdec->pool);
+-    /* Set the allocator of new spacemitdec bufferpool */
+-    config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pool));
+-
+-    if (gst_buffer_pool_config_get_allocator (config, &allocator, NULL))
+-      gst_query_set_nth_allocation_param (query, 0, allocator, NULL);
+-    gst_structure_free (config);
+-
+-    gst_query_set_nth_allocation_pool (query, 0, pool, size, min,
+-        max);
+-  } else {
+-    goto no_support;
+-  }
+-#endif
++  thiz->allocator = gst_spacemit_dec_allocator_new ();
++  GST_DEBUG_OBJECT (thiz, "finish decide_allocation");
+ 
+ 	return TRUE;
+ 
+@@ -1619,16 +1357,28 @@ static GstStateChangeReturn
+ gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transition)
+ {
+   GstVideoDecoder *decoder = GST_VIDEO_DECODER (element);
+-  GST_DEBUG_OBJECT (decoder, "start change state, %x", transition);
++  GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
++  GstState current, next;
++
++  /* we don't need to take the STATE_LOCK, it is already taken */
++  current = (GstState) GST_STATE_TRANSITION_CURRENT (transition);
++  next = (GstState) GST_STATE_TRANSITION_NEXT (transition);
++
++  GST_DEBUG_OBJECT (thiz,  "changing state of children from %s to %s",
++      gst_element_state_get_name (current), gst_element_state_get_name (next));
+ 
+   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+-    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+-    if (!(gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED))
+-      return TRUE;
+-    
+-    GST_DEBUG_OBJECT (decoder, "stopping decoding thread");
+-    gst_pad_stop_task (decoder->srcpad);
+-    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
++    if (gst_pad_get_task_state (decoder->srcpad) == GST_TASK_STARTED) {
++      GST_DEBUG_OBJECT (thiz, "pause decoding thread, %s", gst_element_state_get_name (GST_STATE (GST_ELEMENT (thiz))));
++      gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (thiz));
++      GST_DEBUG_OBJECT (thiz, "pause decoding thread SUCCESS");
++    }
++
++    if (gst_pad_get_task_state (decoder->srcpad) == GST_TASK_PAUSED) {
++      GST_DEBUG_OBJECT (thiz, "stopping decoding thread");
++      gst_pad_stop_task (decoder->srcpad);
++      GST_DEBUG_OBJECT (thiz, "stopping decoding thread SUCCESS");
++    }
+   }
+ 
+   return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.h b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+index 0b0bc22..068cbd9 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.h
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+@@ -23,7 +23,6 @@
+ #include <gst/video/video.h>
+ #include <gst/video/gstvideodecoder.h>
+ #include "gstspacemitallocator.h"
+-#include "gstspacemitbufferpool.h"
+ 
+ #include <vdec.h>
+ 
+@@ -38,10 +37,22 @@ G_BEGIN_DECLS
+ typedef struct _GstSpacemitDec GstSpacemitDec;
+ typedef struct _GstSpacemitDecClass GstSpacemitDecClass;
+ 
++typedef enum
++{
++  GST_SPACEMIT_DEC_INVAILD = -1,
++
++  GST_SPACEMIT_DEC_INIT = 0,
++  GST_SPACEMIT_DEC_START,
++  GST_SPACEMIT_DEC_STOP,
++  GST_SPACEMIT_DEC_FINALIZE,
++
++  GST_SPACEMIT_DEC_MAX,
++} SpacemitStatus;
++
+ struct _GstSpacemitDec
+ {
+   GstVideoDecoder base_spacemitdec;
+-
++  GstAllocator *allocator;
+   MppVdecCtx *ctx;
+   MppVdecPara *para;
+   MppPacket *mpppacket;
+@@ -56,7 +67,7 @@ struct _GstSpacemitDec
+ 
+   GstVideoCodecState *input_state;
+   GstFlowReturn downstream_flow_ret;
+-  gboolean at_eos;
++  SpacemitStatus status;
+   guint32 cur_frame_number;	/* ED */
+   GstVideoInfo out_info;
+   /* stop handling new frame when flushing */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitenc.c b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+index 2070c8b..f29cbaa 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitenc.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+@@ -890,20 +890,15 @@ static gint32 gst_spacemitenc_venc_encode (GstSpacemitEnc * thiz, MppFrame *mppf
+ MppFrame *get_mppframe_from_vdec_mem (GstSpacemitEnc * thiz, GstBuffer *input_buffer)
+ {
+   GstMemory *mem;
+-  GstSpaceMitMemory *spm_mem;
+   MppFrame *mppframe = NULL;
+ 
+   if (input_buffer != NULL) {
+     mem = gst_buffer_peek_memory (input_buffer, 0);
+ 
+-    if (GST_IS_SPACEMIT_ALLOCATOR (mem->allocator)) {
+-      spm_mem = (GstSpaceMitMemory *) mem;
+-      GST_DEBUG_OBJECT (thiz, "mem %p allocator is spacemit", mem);
+-    } else {
+-      spm_mem = gst_mini_object_get_qdata (GST_MINI_OBJECT (mem),
+-          GST_SPM_DMABUF_MEMORY_QUARK);
++    if (GST_IS_SPACEMIT_DEC_ALLOCATOR (mem->allocator)) {    
++      mppframe = gst_mini_object_get_qdata (GST_MINI_OBJECT (mem),
++          GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK);
+ 
+-      mppframe = spm_mem->mppframe;
+       GST_DEBUG_OBJECT (thiz, "mem %p allocator is spacemit (dmabuf), mppframe id:%d, fd: %d, eos: %d",
+         mem, FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0), FRAME_GetEos(mppframe));
+     }
+diff --git a/ext/spacemit/spacemitcodec/meson.build b/ext/spacemit/spacemitcodec/meson.build
+index e7deda1..5495051 100755
+--- a/ext/spacemit/spacemitcodec/meson.build
++++ b/ext/spacemit/spacemitcodec/meson.build
+@@ -1,6 +1,5 @@
+ spacemitcodec_sources = [
+   'gstspacemitallocator.c',
+-  'gstspacemitbufferpool.c',
+   'gstspacemitenc.c',
+   'gstspacemitdec.c',
+   'gstspacemitplugin.c',
+diff --git a/ext/wayland/gstwaylandsink.c b/ext/wayland/gstwaylandsink.c
+index 2f116bf..23cf84d 100644
+--- a/ext/wayland/gstwaylandsink.c
++++ b/ext/wayland/gstwaylandsink.c
+@@ -43,6 +43,7 @@
+ #endif
+ 
+ #include "gstwaylandsink.h"
++
+ #include <gst/allocators/allocators.h>
+ 
+ #include <gst/video/videooverlay.h>
+@@ -294,7 +295,8 @@ gst_wayland_sink_set_property (GObject * object,
+           FALSE);
+       break;
+     default:
+-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      if (!gst_video_overlay_set_property (object, PROP_LAST, prop_id, value))
++        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+   }
+ }
+@@ -433,6 +435,10 @@ gst_wayland_sink_change_state (GstElement * element, GstStateChange transition)
+       }
+       self->redraw_pending = FALSE;
+       g_mutex_unlock (&self->render_lock);
++
++      GST_WARNING_OBJECT (self, "start release all priv buffers");
++      //release all upstream ref gstbuffer
++      gst_wl_display_release_buffers(self->display);
+       break;
+     case GST_STATE_CHANGE_READY_TO_NULL:
+       g_mutex_lock (&self->display_lock);
+@@ -762,6 +768,13 @@ gst_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
+       /* if we were not provided a window, create one ourselves */
+       self->window = gst_wl_window_new_toplevel (self->display,
+           &self->video_info, self->fullscreen, &self->render_lock);
++
++      if (!self->fullscreen) {
++        if (self->x || self->y || self->w || self->h) {
++            GST_WARNING_OBJECT (self, "set render rectangle <%d,%d,%d,%d>", self->x, self->y, self->w, self->h);
++            gst_wl_window_set_render_rectangle (self->window, self->x, self->y, self->w, self->h);
++        }
++      }
+       g_signal_connect_object (self->window, "closed",
+           G_CALLBACK (on_window_closed), self, 0);
+       gst_wl_window_set_rotate_method (self->window,
+@@ -1037,6 +1050,10 @@ gst_wayland_sink_set_render_rectangle (GstVideoOverlay * overlay,
+   g_mutex_lock (&self->render_lock);
+   if (!self->window) {
+     g_mutex_unlock (&self->render_lock);
++    self->x = x;
++    self->y = y;
++    self->w = w;
++    self->h = h;
+     GST_WARNING_OBJECT (self,
+         "set_render_rectangle called without window, ignoring");
+     return;
+diff --git a/ext/wayland/gstwaylandsink.h b/ext/wayland/gstwaylandsink.h
+index 3243d8c..15daeb5 100644
+--- a/ext/wayland/gstwaylandsink.h
++++ b/ext/wayland/gstwaylandsink.h
+@@ -62,6 +62,10 @@ struct _GstWaylandSink
+   gboolean redraw_pending;
+   GMutex render_lock;
+   GstBuffer *last_buffer;
++  gint x;
++  gint y;
++  gint w;
++  gint h;
+ 
+   GstVideoOrientationMethod sink_rotate_method;
+   GstVideoOrientationMethod tag_rotate_method;
+diff --git a/gst-libs/gst/wayland/gstwldisplay.c b/gst-libs/gst/wayland/gstwldisplay.c
+index 1f83cb2..2571636 100644
+--- a/gst-libs/gst/wayland/gstwldisplay.c
++++ b/gst-libs/gst/wayland/gstwldisplay.c
+@@ -100,12 +100,33 @@ gst_wl_ref_wl_buffer (gpointer key, gpointer value, gpointer user_data)
+   g_object_ref (value);
+ }
+ 
++void gst_wl_display_release_buffers (GstWlDisplay *self)
++{
++  GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
++
++  gst_poll_set_flushing (priv->wl_fd_poll, TRUE);
++  if (priv->thread)
++    g_thread_join (priv->thread);
++
++  /* to avoid buffers being unregistered from another thread
++   * at the same time, take their ownership */
++  g_mutex_lock (&priv->buffers_mutex);
++  priv->shutting_down = TRUE;
++  g_hash_table_foreach (priv->buffers, gst_wl_ref_wl_buffer, NULL);
++  g_mutex_unlock (&priv->buffers_mutex);
++
++  g_hash_table_foreach (priv->buffers,
++      (GHFunc) gst_wl_buffer_force_release_and_unref, NULL);
++  g_hash_table_remove_all (priv->buffers);
++  GST_WARNING_OBJECT (self, "release all priv buffers");
++}
++
+ static void
+ gst_wl_display_finalize (GObject * gobject)
+ {
+   GstWlDisplay *self = GST_WL_DISPLAY (gobject);
+   GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
+-
++#if 0
+   gst_poll_set_flushing (priv->wl_fd_poll, TRUE);
+   if (priv->thread)
+     g_thread_join (priv->thread);
+@@ -120,7 +141,7 @@ gst_wl_display_finalize (GObject * gobject)
+   g_hash_table_foreach (priv->buffers,
+       (GHFunc) gst_wl_buffer_force_release_and_unref, NULL);
+   g_hash_table_remove_all (priv->buffers);
+-
++#endif
+   g_array_unref (priv->shm_formats);
+   g_array_unref (priv->dmabuf_formats);
+   gst_poll_free (priv->wl_fd_poll);
+diff --git a/gst-libs/gst/wayland/gstwldisplay.h b/gst-libs/gst/wayland/gstwldisplay.h
+index eb07e4f..a8834fb 100644
+--- a/gst-libs/gst/wayland/gstwldisplay.h
++++ b/gst-libs/gst/wayland/gstwldisplay.h
+@@ -97,4 +97,7 @@ struct zwp_linux_dmabuf_v1 *gst_wl_display_get_dmabuf_v1 (GstWlDisplay * self);
+ GST_WL_API
+ gboolean gst_wl_display_has_own_display (GstWlDisplay * self);
+ 
++GST_WL_API
++void gst_wl_display_release_buffers (GstWlDisplay *self);
++
+ G_END_DECLS

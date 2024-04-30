@@ -1,0 +1,170 @@
+From ab15915b1abe6e2ee79dbcc0536ab96bbf400d2e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=BB=8E=E5=BF=97=E8=8D=A3?= <lizhirong>
+Date: Fri, 26 Apr 2024 17:11:41 +0800
+Subject: [PATCH] support spacemitsrc to output vir buffer by close_dmabuf=1
+
+---
+ ext/spacemit/spacemitsrc/gstspacemitsrc.c | 55 +++++++++++++++++------
+ ext/spacemit/spacemitsrc/gstspacemitsrc.h |  2 +-
+ 2 files changed, 43 insertions(+), 14 deletions(-)
+
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.c b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+index 8a973a5..7ba0cca 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.c
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+@@ -77,6 +77,7 @@ enum
+   PROP_Y,
+   PROP_WIDTH,
+   PROP_HEIGHT,
++  PROP_CLOSE_DMABUF,
+   PROP_BINNING
+ };
+ 
+@@ -216,6 +217,10 @@ gst_spacemitsrc_class_init (GstSpacemitSrcClass * klass)
+       g_param_spec_int ("binning", "Binning", "Symmetrical binning", 1, 8,
+           DEFAULT_PROP_BINNING,
+           (GParamFlags) (G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE)));
++  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_CLOSE_DMABUF,
++      g_param_spec_boolean ("close-dmabuf", "close dmabuf",
++          "Close Dmabuf feature", FALSE,
++          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ }
+ 
+ static void
+@@ -232,7 +237,7 @@ gst_spacemitsrc_reset (GstSpacemitSrc * src)
+   src->width = DEFAULT_PROP_WIDTH;
+   src->height = DEFAULT_PROP_HEIGHT;
+   src->binning = DEFAULT_PROP_BINNING;
+-
++  src->use_dmabuf = TRUE;
+   src->last_frame_count = 0;
+   src->total_dropped_frames = 0;
+ 
+@@ -364,6 +369,9 @@ gst_spacemitsrc_set_property (GObject * object, guint property_id,
+     case PROP_HEIGHT:
+       src->height = g_value_get_int (value);
+       break;
++    case PROP_CLOSE_DMABUF:
++      src->use_dmabuf = FALSE;
++      break;
+     case PROP_BINNING:
+       src->binning = g_value_get_int (value);
+       break;
+@@ -420,6 +428,9 @@ gst_spacemitsrc_get_property (GObject * object, guint property_id,
+     case PROP_HEIGHT:
+       g_value_set_int (value, src->height);
+       break;
++    case PROP_CLOSE_DMABUF:
++      g_value_set_boolean (value, src->use_dmabuf);
++      break;
+     case PROP_BINNING:
+       g_value_set_int (value, src->binning);
+       break;
+@@ -470,6 +481,7 @@ typedef struct
+   GstClockTime clock_time;
+   GstClockTime use_dur;
+   GstBuffer *gstbuf;
++  void *virAddr;
+   gint index;
+ } VideoFrame;
+ 
+@@ -509,9 +521,9 @@ video_frame_create (GstSpacemitSrc * src, IMAGE_BUFFER_S* buffer)
+   frame->src = src;
+   frame->outputBuf = buffer;
+   frame->fd = buffer->m.fd;
++  frame->virAddr = buffer->planes[0].virAddr;
+ 
+-
+-  CLOG_INFO("create a video_frame, buffer: %p, fd: %d", buffer, buffer->m.fd);
++  CLOG_INFO("create a video_frame, buffer: %p, fd: %d, virAddr: %p", buffer, buffer->m.fd, frame->virAddr);
+ 
+   return frame;
+ }
+@@ -575,7 +587,7 @@ gst_spacemitsrc_setup_stream (GstSpacemitSrc * src)
+   src->sensorHandle = sensorHandle;
+   src->sensorInfoId = sensor_info.sensorId;
+ 
+-  GST_DEBUG_OBJECT (src, "sensor stream on");
++  GST_DEBUG_OBJECT (src, "sensor stream on (%d)", src->use_dmabuf);
+   {
+     GstStructure *structure;
+     GstCaps *caps;
+@@ -593,9 +605,11 @@ gst_spacemitsrc_setup_stream (GstSpacemitSrc * src)
+     if (src->caps) {
+       gst_caps_unref (src->caps);
+     }
+-    gst_caps_set_features (caps, 0,
+-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+-    GST_INFO_OBJECT (src, "set DMABUF feature to spacemitsrc src cap %" GST_PTR_FORMAT, caps);
++    if (src->use_dmabuf) {
++      gst_caps_set_features (caps, 0,
++        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
++      GST_INFO_OBJECT (src, "set DMABUF feature to spacemitsrc src cap %" GST_PTR_FORMAT, caps);
++    }
+     src->caps = caps;
+     gst_base_src_set_caps (GST_BASE_SRC (src), src->caps);
+   }
+@@ -709,6 +723,10 @@ gst_spacemitsrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * query)
+   guint size, min = 1, max = 0;
+ 
+   GST_DEBUG_OBJECT (src, "decide_allocation be params: %" GST_PTR_FORMAT, query);
++  if (src->use_dmabuf == 0) {
++    goto parent;
++  }
++
+   allocator = gst_spacemit_src_allocator_new ();
+   if (!allocator)
+     goto error_no_allocator;
+@@ -743,6 +761,7 @@ gst_spacemitsrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * query)
+     nallocator, GST_IS_DMABUF_ALLOCATOR(src->allocator));
+ 
+   GST_DEBUG_OBJECT (src, "decide_allocation af params: %" GST_PTR_FORMAT, query);
++parent:
+   if (!GST_BASE_SRC_CLASS(gst_spacemitsrc_parent_class)->decide_allocation(bsrc, query))
+     return FALSE;
+ 
+@@ -780,12 +799,22 @@ gst_spacemitsrc_create (GstPushSrc * psrc, GstBuffer ** buf)
+   }
+ 
+   GstBuffer *newbuf;
+-  GstMemory *mem;
+-  newbuf = gst_buffer_new ();
+-  mem = gst_dmabuf_allocator_alloc_with_flags (src->allocator, video_frame->fd,
+-    src->para.out_width * src->para.out_height * 1.5, GST_FD_MEMORY_FLAG_DONT_CLOSE);
+-  gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), GST_SPACEMIT_SRC_DMABUF_MEMORY_QUARK, outputBuf, video_frame_release);
+-  gst_buffer_append_memory (newbuf, mem);
++
++  if (src->use_dmabuf) {
++    GstMemory *mem;
++    newbuf = gst_buffer_new ();
++
++    mem = gst_dmabuf_allocator_alloc_with_flags (src->allocator, video_frame->fd,
++      src->para.out_width * src->para.out_height * 1.5, GST_FD_MEMORY_FLAG_DONT_CLOSE);
++    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), GST_SPACEMIT_SRC_DMABUF_MEMORY_QUARK, outputBuf, video_frame_release);
++    gst_buffer_append_memory (newbuf, mem);
++  } else {
++    newbuf = gst_buffer_new_wrapped_full ((GstMemoryFlags)
++        GST_MEMORY_FLAG_READONLY,
++        (gpointer) outputBuf->planes[0].virAddr, src->para.out_width * src->para.out_height * 1.5, 0,
++        src->para.out_width * src->para.out_height * 1.5, outputBuf,
++        (GDestroyNotify) video_frame_release);
++  }
+ 
+   //bind release func to cpp output buffer 
+   // *buf = gst_buffer_new_wrapped_full ((GstMemoryFlags)
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.h b/ext/spacemit/spacemitsrc/gstspacemitsrc.h
+index 77366df..c2dc011 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.h
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.h
+@@ -67,7 +67,7 @@ struct _GstSpacemitSrc
+   gint width;
+   gint height;
+   gint binning;
+-
++  gboolean use_dmabuf;
+   GMutex mutex;
+   GAsyncQueue *queue;
+   GstClockTime base_time;
+-- 
+2.25.1
+
