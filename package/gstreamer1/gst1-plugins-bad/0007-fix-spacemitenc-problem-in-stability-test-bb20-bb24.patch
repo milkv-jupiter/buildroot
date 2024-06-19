@@ -1,0 +1,3303 @@
+diff --git a/debian/gstreamer1.0-plugins-bad/usr/share/gstreamer-1.0/presets/GstSpacemitVp8Enc.prs b/debian/gstreamer1.0-plugins-bad/usr/share/gstreamer-1.0/presets/GstSpacemitVp8Enc.prs
+new file mode 100644
+index 0000000..81ddb5a
+--- /dev/null
++++ b/debian/gstreamer1.0-plugins-bad/usr/share/gstreamer-1.0/presets/GstSpacemitVp8Enc.prs
+@@ -0,0 +1,9 @@
++[_presets_]
++version=0.10
++element-name=GstSpacemitVp8Enc
++
++[Profile Realtime]
++deadline=1
++cpu-used=4
++lag-in-frames=0
++
+diff --git a/ext/spacemit/spacemitcodec/GstSpacemitVp8Enc.prs b/ext/spacemit/spacemitcodec/GstSpacemitVp8Enc.prs
+new file mode 100644
+index 0000000..81ddb5a
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/GstSpacemitVp8Enc.prs
+@@ -0,0 +1,9 @@
++[_presets_]
++version=0.10
++element-name=GstSpacemitVp8Enc
++
++[Profile Realtime]
++deadline=1
++cpu-used=4
++lag-in-frames=0
++
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.c b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+index cc0c7ca..ef7695f 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+@@ -32,7 +32,16 @@ GST_DEBUG_CATEGORY_STATIC (gst_spacemitdec_debug_category);
+ #define GST_CAT_DEFAULT gst_spacemitdec_debug_category
+ 
+ #define EOS_FARME_NUM 3
+-#define MAX_POLL_TIME 0xffffffff
++#define MAX_POLL_TIME 0xfffff
++#define GST_SPACEMITDEC_BROADCAST(thiz) \
++  g_mutex_lock (&thiz->finish_mtx); \
++  g_cond_broadcast (&thiz->finish_cond); \
++  g_mutex_unlock (&thiz->finish_mtx);
++
++#define GST_SPACEMITDEC_WAIT(thiz) \
++  g_mutex_lock (&thiz->finish_mtx); \
++  g_cond_wait (&thiz->finish_cond, &thiz->finish_mtx); \
++  g_mutex_unlock (&thiz->finish_mtx);
+ 
+ /* prototypes */
+ static void gst_spacemitdec_set_property (GObject * object,
+@@ -51,6 +60,10 @@ static gboolean gst_spacemitdec_decide_allocation(GstVideoDecoder *decoder, GstQ
+ static GstStateChangeReturn gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transition);
+ static GstFlowReturn gst_spacemitdec_parse (GstVideoDecoder * bdec, GstVideoCodecFrame * frame, GstAdapter * adapter, gboolean at_eos);
+ 
++//optimize: 
++//1. use gst_video_codec_frame_set_user_data, eg: gstnvdec.c
++//2. create pool, eg: gst_nvdec_ensure_cuda_pool
++
+ /* pad templates */
+ static GstStaticPadTemplate gst_spacemitdec_sink_template =
+ GST_STATIC_PAD_TEMPLATE ("sink",
+@@ -95,7 +108,7 @@ enum
+   PROP_0,
+   PROP_CODING_WIDTH,
+   PROP_CODING_HIGHT,
+-  PROP_CLOSE_DMABUF,
++  PROP_DECODER_PARSE,
+   PROP_CODE_TYPE,
+   PROP_CODE_YUV_FORMAT,
+   PROP_SAVE_DEC_IMAGE,
+@@ -210,12 +223,16 @@ static void gst_spacemitdec_class_init(GstSpacemitDecClass * klass)
+   g_object_class_install_property (gobject_class, PROP_CODE_YUV_FORMAT,
+       g_param_spec_uint ("code-yuv-format", "code yuv format",
+           "Decode the generated yuv format",
+-          PIXEL_FORMAT_UNKNOWN, PIXEL_FORMAT_MAX - 1, PIXEL_FORMAT_I420,
++          PIXEL_FORMAT_UNKNOWN, PIXEL_FORMAT_MAX - 1, PIXEL_FORMAT_NV12,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+   g_object_class_install_property (gobject_class, PROP_SAVE_DEC_IMAGE,
+       g_param_spec_boolean ("save-dec-images", "save dec images",
+           "save dec image to /tmp/", FALSE,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++  g_object_class_install_property (gobject_class, PROP_DECODER_PARSE,
++      g_param_spec_boolean ("doceder-parse", "doceder parse",
++          "doceder parse should close in mjpeg dec", TRUE,
++          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ }
+ 
+ static void gst_spacemitdec_init (GstSpacemitDec * thiz)
+@@ -234,8 +251,12 @@ static void gst_spacemitdec_init (GstSpacemitDec * thiz)
+   thiz->eOutputPixelFormat = PIXEL_FORMAT_NV12;
+   thiz->dec_nonblock = TRUE;
+   thiz->req_nonblock = TRUE;
+-  thiz->wait_reschange = FALSE;
++  thiz->wait_reschange = TRUE;
+   thiz->save_dec = FALSE;
++  thiz->dec_parse = TRUE;
++
++  g_mutex_init (&thiz->finish_mtx);
++  g_cond_init (&thiz->finish_cond);
+ 
+   gst_video_decoder_set_packetized (decoder, TRUE);
+   gst_video_decoder_set_needs_format (decoder, TRUE);
+@@ -261,6 +282,9 @@ gst_spacemitdec_set_property (GObject * object, guint property_id,
+     case PROP_DOWNSCALE:
+       thiz->downscale = g_value_get_uint (value);
+       break;
++    case PROP_DECODER_PARSE:
++      thiz->dec_parse = g_value_get_boolean (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+       break;
+@@ -288,6 +312,9 @@ gst_spacemitdec_get_property (GObject * object, guint property_id,
+     case PROP_DOWNSCALE:
+       g_value_set_uint (value, thiz->downscale);
+       break;
++    case PROP_DECODER_PARSE:
++      g_value_set_boolean (value, thiz->dec_parse);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+       break;
+@@ -301,6 +328,8 @@ gst_spacemitdec_finalize (GObject * object)
+ 
+   GST_DEBUG_OBJECT (thiz, "finalize");
+ 
++  g_cond_clear (&thiz->finish_cond);
++  g_mutex_clear (&thiz->finish_mtx);
+   /* clean up object here */
+   if (thiz->input_state)
+     gst_video_codec_state_unref (thiz->input_state);
+@@ -319,7 +348,9 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+   thiz->mppframe = NULL;
+   thiz->downstream_flow_ret = GST_FLOW_OK;
+   thiz->cur_frame_number = -1;
+-  thiz->initialized = FALSE;
++  thiz->handle_frames = 0;
++  thiz->finish_frames = 0;
++
+   if (thiz->save_dec)
+     thiz->fb = fopen("/tmp/spacemitdec_out.yuv", "wb+");
+   
+@@ -328,6 +359,8 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+   thiz->parse_resync = FALSE;
+ 
+   thiz->ctx = VDEC_CreateChannel ();
++  GST_DEBUG_OBJECT (thiz, "start ctx %p", thiz->ctx);
++
+   gctx = thiz->ctx;
+   thiz->mpppacket = PACKET_Create ();
+   if (!thiz->mpppacket) {
+@@ -335,6 +368,7 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+     return FALSE;
+   }
+   thiz->ctx->eCodecType = thiz->eCodecType;
++  thiz->status = DECODER_CREATE;
+ 
+   GST_DEBUG_OBJECT (thiz, "finish start ! (%d)", thiz->save_dec);
+ 
+@@ -344,9 +378,9 @@ static gboolean gst_spacemitdec_start (GstVideoDecoder * decoder)
+ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+-  gboolean wait_ret = TRUE;
++  gint32 ret;
+ 
+-  GST_DEBUG_OBJECT (thiz, "start finish stop");
++  GST_DEBUG_OBJECT (thiz, "start stop");
+ 
+   if (thiz->save_dec)
+     fclose(thiz->fb);
+@@ -355,19 +389,22 @@ static gboolean gst_spacemitdec_stop(GstVideoDecoder * decoder)
+   thiz->parse_resync = FALSE;
+   thiz->saw_header = FALSE;
+ 
++  GST_DEBUG_OBJECT (thiz, "start stop %p, %p", thiz->ctx, thiz->mpppacket);
++
+   VDEC_DestoryChannel (thiz->ctx);
+   thiz->ctx = gctx = NULL;
+ 
+   PACKET_Destory(thiz->mpppacket);
+   thiz->mpppacket = NULL;
+ 
++  thiz->status = DECODER_DESTORY;
+   if (!(gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED)) {
+-    GST_DEBUG_OBJECT (thiz, "finish stop, mem back %d", wait_ret);
++    GST_DEBUG_OBJECT (thiz, "finish stop");
+     return TRUE;
+   }
+ 
+   gst_pad_stop_task (decoder->srcpad);
+-  GST_DEBUG_OBJECT (thiz, "finish stop222, mem back %d", wait_ret);
++  GST_DEBUG_OBJECT (thiz, "finish stop222");
+ 
+ 	return TRUE;
+ }
+@@ -417,7 +454,7 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+   GstStructure *structure;
+   gboolean ret = TRUE;
+ 
+-  if (thiz->initialized)
++  if (thiz->status == DECODER_INIT)
+     return TRUE;
+ 
+   structure = gst_caps_get_structure (thiz->input_state->caps, 0);
+@@ -444,12 +481,14 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+     thiz->ctx->stVdecPara.nRotateDegree = 0;
+     thiz->ctx->stVdecPara.bThumbnailMode = 0;
+     thiz->ctx->stVdecPara.bIsInterlaced = MPP_FALSE;
+-    thiz->ctx->stVdecPara.eFrameBufferType = MPP_FRAME_BUFFERTYPE_DMABUF_INTERNAL;
+-
++    if (srcpad_can_dmabuf(thiz))
++      thiz->ctx->stVdecPara.eFrameBufferType = MPP_FRAME_BUFFERTYPE_DMABUF_INTERNAL;
++    else
++      thiz->ctx->stVdecPara.eFrameBufferType = MPP_FRAME_BUFFERTYPE_NORMAL_INTERNAL;
+     thiz->ctx->stVdecPara.bInputBlockModeEnable = MPP_TRUE;
+     thiz->ctx->stVdecPara.bOutputBlockModeEnable = MPP_TRUE;
+-    GST_DEBUG_OBJECT (thiz, "spacemitdec set eCodecType is %d, downscale:%u, eCodingType:%d",
+-       thiz->ctx->eCodecType, thiz->downscale, thiz->eCodingType);
++    GST_DEBUG_OBJECT (thiz, "spacemitdec set eCodecType is %d, downscale:%u, eCodingType:%d, buffertype:%d",
++       thiz->ctx->eCodecType, thiz->downscale, thiz->eCodingType, thiz->ctx->stVdecPara.eFrameBufferType);
+ 
+     ret = VDEC_Init (thiz->ctx);
+     if (ret) {
+@@ -457,14 +496,15 @@ gst_spacemitdec_init_decoder (GstSpacemitDec * thiz)
+       return FALSE;
+     }
+ 
+-    if (thiz->eCodecType == CODEC_V4L2_LINLONV5V7)
+-      thiz->wait_reschange = TRUE;
++    // if (thiz->eCodecType == CODEC_V4L2_LINLONV5V7)
++    //   thiz->wait_reschange = TRUE;
+   } else {
+     GST_ERROR_OBJECT (thiz, "no supprot this eCodecType: %d", thiz->ctx->eCodecType);
+     return FALSE;
+   }
+ 
+-  thiz->initialized = TRUE;
++  thiz->buffertype = thiz->ctx->stVdecPara.eFrameBufferType;
++  thiz->status = DECODER_INIT;
+   return TRUE;
+ }
+ 
+@@ -473,7 +513,7 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+   GstStructure *structure;
+   gboolean ret = TRUE;
+-  gboolean parsed = FALSE;
++  gboolean parsed = TRUE;
+ 
+ 	GST_DEBUG_OBJECT(thiz, "input caps: %" GST_PTR_FORMAT, state->caps);
+ 
+@@ -494,8 +534,12 @@ static gboolean gst_spacemitdec_set_format(GstVideoDecoder * decoder, GstVideoCo
+       gst_structure_get_boolean (structure, "parsed", &parsed);
+     else
+       parsed = TRUE;
++
++    parsed = thiz->dec_parse ? parsed : FALSE;
++
+     gst_video_decoder_set_packetized (thiz, parsed);
+   }
++
+ 	GST_DEBUG_OBJECT (thiz, "set format finish (%d, %d, %d), (%d, %d, %d)",
+     thiz->input_state->info.width, thiz->input_state->info.height, thiz->input_state->info.size,
+     state->info.width, state->info.height, state->info.size);
+@@ -510,17 +554,11 @@ gst_spacemitdec_flush (GstVideoDecoder * decoder)
+ {
+ 	GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+ 
+-  GST_DEBUG_OBJECT (thiz, "sstart flush, (%d)", thiz->downstream_flow_ret);
++  GST_DEBUG_OBJECT (thiz, "sstart flush, (%s)", gst_flow_get_name(thiz->downstream_flow_ret));
+ 
+   thiz->flushing = TRUE;
+ 
+   VDEC_ResetChannel(thiz->ctx);
+-  // if (thiz->downstream_flow_ret == GST_FLOW_EOS) {
+-  //   if (thiz->eCodecType != CODEC_V4L2_LINLONV5V7)
+-  //     VDEC_Flush(thiz->ctx);
+-  //   else
+-  //     VDEC_ResetChannel(thiz->ctx);
+-  // }
+ 
+   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+ 
+@@ -540,6 +578,7 @@ gst_spacemitdec_flush (GstVideoDecoder * decoder)
+   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+ 
+   thiz->flushing = FALSE;
++
+   thiz->downstream_flow_ret = GST_FLOW_OK;
+   
+   GST_DEBUG_OBJECT (thiz, "finish flush");
+@@ -627,7 +666,7 @@ save_decoder_images_for_test (GstVideoDecoder * decoder, GstBuffer *outbuf)
+ 
+   for (p = 0; p < GST_VIDEO_INFO_N_PLANES (vinfo); p++) {
+     data = (U8*)FRAME_GetDataPointer(thiz->mppframe, p);
+-//      dst = GST_VIDEO_FRAME_PLANE_DATA (&video_frame, p);
++    //  data = GST_VIDEO_FRAME_PLANE_DATA (&video_frame, p);
+ 
+     for (h = 0; h < dst_height[p]; h++) {
+       fwrite(data, 1, dst_width[p], thiz->fb);
+@@ -643,11 +682,15 @@ save_decoder_images_for_test (GstVideoDecoder * decoder, GstBuffer *outbuf)
+   return GST_FLOW_OK;
+ }
+ static void
+-dma_memory_release (void *data)
++decoder_memory_release (void *data)
+ {
+   MppFrame * mppframe = (MppFrame *) data;
+   GST_DEBUG ("release a mppframe id:%d fd:%d", FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0));
+-  VDEC_ReturnOutputFrame(gctx, FRAME_GetBaseData(mppframe));
++
++  if (gctx == NULL) //for gtkglsink playbin exit
++    GST_ERROR ("the mppframe id:%d fd:%d is leakage??", FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0));
++  else
++    VDEC_ReturnOutputFrame(gctx, FRAME_GetBaseData(mppframe));
+   FRAME_Destory(mppframe);
+ }
+ 
+@@ -663,22 +706,36 @@ gst_spacemitdec_fill_output_buffer (GstVideoDecoder * decoder,
+   gint32 id = -1;
+   gint32 fd = -1;
+   GstBuffer *newbuf;
++  GstVideoMeta *video_meta;
+ 
+   id = FRAME_GetID(thiz->mppframe);
+   fd = FRAME_GetFD(thiz->mppframe, 0);
+-  GST_DEBUG_OBJECT (thiz, "get mppframe id:%d fd:%d", id, fd);
+-
+-  newbuf = gst_buffer_new ();
+-  mem = gst_dmabuf_allocator_alloc_with_flags (thiz->allocator, fd,
+-    thiz->width * thiz->height * 1.5, GST_FD_MEMORY_FLAG_DONT_CLOSE);
+-  gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK, thiz->mppframe, dma_memory_release);
+-  gst_buffer_append_memory (newbuf, mem);
+-
++  GST_DEBUG_OBJECT (thiz, "get mppframe id:%d fd:%d, mppframe nDataUsedNum:%d", id, fd, FRAME_GetDataUsedNum(thiz->mppframe));
++
++  if (thiz->buffertype == MPP_FRAME_BUFFERTYPE_DMABUF_INTERNAL) {
++    newbuf = gst_buffer_new ();
++    mem = gst_dmabuf_allocator_alloc_with_flags (thiz->allocator, fd,
++      thiz->width * thiz->height * 1.5, GST_FD_MEMORY_FLAG_DONT_CLOSE);
++    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK, thiz->mppframe, decoder_memory_release);
++    gst_buffer_append_memory (newbuf, mem);
++  } else {
++    guint8 *ptr = (guint8 *)g_malloc (thiz->width * thiz->height * 1.5);
++    memcpy (ptr, FRAME_GetDataPointer(thiz->mppframe, 0), thiz->width * thiz->height);
++    memcpy (ptr + thiz->width * thiz->height, FRAME_GetDataPointer(thiz->mppframe, 1), thiz->width * thiz->height / 2);
++
++    newbuf = gst_buffer_new_wrapped_full ((GstMemoryFlags)
++      GST_MEMORY_FLAG_READONLY,
++      (gpointer) ptr, thiz->width * thiz->height * 1.5, 0,
++      thiz->width * thiz->height * 1.5, ptr,
++      (GDestroyNotify) g_free);
++    VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
++    FRAME_Destory(thiz->mppframe);
++  }
+   *output_buffer = newbuf;
+   GST_DEBUG_OBJECT (thiz, "finish buffer %p fill, mem:%p", newbuf, mem);
+ 
+   if (thiz->save_dec)
+-    flow_status = save_decoder_images_for_test (decoder, outbuf);
++    flow_status = save_decoder_images_for_test (decoder, newbuf);
+ 
+ done:
+   thiz->mppframe = NULL;
+@@ -690,6 +747,7 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+   MppFrame *mppframe = NULL;
+   gint32 ret;
+   static guint count = 0;
++  guint8 *data = NULL;
+ 
+   mppframe = FRAME_Create();
+   if (!mppframe) {
+@@ -702,14 +760,14 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+     if (ret != MPP_CODER_NO_DATA) {
+       break;
+     } else {
+-      if (GST_STATE (GST_ELEMENT (thiz)) == GST_STATE_PAUSED) {
+-        GST_INFO_OBJECT (thiz, "spacemitdec element is in pause, exit request try");
+-        return GST_STATE_PAUSED;
++      if (GST_STATE (GST_ELEMENT (thiz)) == GST_STATE_PAUSED && thiz->status != DECODER_WORKING) {
++        GST_INFO_OBJECT (thiz, "element in pause, exit VDEC_RequestOutputFrame try");
++        ret = MPP_CODER_NULL_DATA;
++        break;
+       }
+       if (count >= 2 && count < MAX_POLL_TIME) {
+         g_usleep(500);
+       } else if (count >= MAX_POLL_TIME) {
+-        GST_ERROR_OBJECT (thiz, "try max times: %u, fail return(%d)", MAX_POLL_TIME, ret);
+         ret = MPP_POLL_FAILED;
+         break;
+       }
+@@ -723,6 +781,43 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+   count = 0;
+   thiz->mppframe = mppframe;
+ 
++  if (ret == MPP_CODER_EOS) {
++    GST_INFO_OBJECT (thiz, "VDEC_RequestOutputFrame return: MPP_CODER_EOS (%d)", ret);
++    VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
++    FRAME_Destory(thiz->mppframe);
++    ret = GST_FLOW_EOS;
++  } else if (ret == MPP_POLL_FAILED) {
++    GST_ERROR_OBJECT (thiz, "try max times: %u ms, fail return(%d)", MAX_POLL_TIME / 2, ret);
++    FRAME_Destory(thiz->mppframe);
++    ret = GST_FLOW_ERROR;
++  } else if  (ret == MPP_CODER_NULL_DATA) {
++    GST_WARNING_OBJECT (thiz, " VDEC_RequestOutputFrame return: MPP_CODER_NULL_DATA (%d)", ret);
++    VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
++    FRAME_Destory(thiz->mppframe);
++    ret = MPP_CODER_NULL_DATA;
++  } else if (ret == MPP_RESOLUTION_CHANGED) {
++    if (thiz->width == thiz->ctx->stVdecPara.nWidth &&
++        thiz->height == thiz->ctx->stVdecPara.nHeight) {
++      GST_DEBUG_OBJECT (thiz, "resolution change from (%u, %u) to (%u, %u), size is same",
++        thiz->width, thiz->height,
++        thiz->ctx->stVdecPara.nWidth, thiz->ctx->stVdecPara.nHeight);
++      thiz->wait_reschange = FALSE;
++      FRAME_Destory(thiz->mppframe);
++      ret = MPP_CODER_NULL_DATA;
++    } else {
++      GST_INFO_OBJECT (thiz, "resolution change from (%u, %u) to (%u, %u), need renegotiate",
++        thiz->width, thiz->height,
++        thiz->ctx->stVdecPara.nWidth, thiz->ctx->stVdecPara.nHeight);
++      ret = GST_FLOW_NOT_NEGOTIATED;
++    }
++  } else if (ret == MPP_OK) {
++    GST_LOG_OBJECT (thiz, " VDEC_RequestOutputFrame return: MPP_OK (%d)", ret);
++    ret = GST_FLOW_OK;
++  } else {
++    GST_WARNING_OBJECT (thiz, "VDEC_RequestOutputFrame other return: (%d) ?", ret);
++    ret = GST_FLOW_OK;
++  }
++
+   return ret;
+ }
+ 
+@@ -730,60 +825,38 @@ static void
+ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC (decoder);
+-  GstVideoCodecFrame * frame;
++  GstVideoCodecFrame * frame = NULL;
+   GstFlowReturn flow_status;
+   GstBuffer *outbuf = NULL;
+-  int req_ret;
++  gint32 req_ret;
+ 
+-  if (G_UNLIKELY(thiz->flushing))
+-    goto flushing;
++  if (G_UNLIKELY(thiz->flushing)) {
++    flow_status = GST_FLOW_FLUSHING;
++    goto done;
++  }
+ 
+   req_ret = gst_spacemitdec_request_frame (thiz);
+-  if (req_ret == MPP_CODER_EOS) {
+-    VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
+-    FRAME_Destory(thiz->mppframe);
+-    goto finish_work;
+-  } else if  (req_ret == MPP_POLL_FAILED) {
+-    thiz->downstream_flow_ret = GST_FLOW_ERROR;
+-    FRAME_Destory(thiz->mppframe);
++  if (req_ret == GST_FLOW_EOS || req_ret == GST_FLOW_NOT_NEGOTIATED || \
++      req_ret == GST_FLOW_ERROR || req_ret == MPP_CODER_NULL_DATA) {
++    flow_status = (req_ret == MPP_CODER_NULL_DATA) ? GST_FLOW_OK : req_ret;
+     goto done;
+-  }  else if  (req_ret == GST_STATE_PAUSED) {
+-    thiz->downstream_flow_ret = GST_FLOW_OK;
+-    GST_INFO_OBJECT (thiz,  "pause task in dec loop (%d)!", thiz->downstream_flow_ret);
+-    gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (thiz));
+-    goto done;
+-  } else if (req_ret == MPP_RESOLUTION_CHANGED) {
+-    if (thiz->width != thiz->ctx->stVdecPara.nWidth &&
+-        thiz->height != thiz->ctx->stVdecPara.nHeight) {
+-      GST_DEBUG_OBJECT (thiz, "resolution change from (%u, %u) to (%u, %u), need renegotiate",
+-        thiz->width, thiz->height,
+-        thiz->ctx->stVdecPara.nWidth, thiz->ctx->stVdecPara.nHeight);
+-    } else {
+-      GST_DEBUG_OBJECT (thiz, "resolution change from (%u, %u) to (%u, %u), size is same",
+-        thiz->width, thiz->height,
+-        thiz->ctx->stVdecPara.nWidth, thiz->ctx->stVdecPara.nHeight);
+-      thiz->wait_reschange = FALSE;
+-      FRAME_Destory(thiz->mppframe);
+-      goto no_frame;
+-    }
+-  } else if (req_ret != MPP_OK)  {
+-    GST_WARNING_OBJECT (thiz, "other return(%d) form mpp, when get dec frame", req_ret);
+   }
+ 
+-  if (thiz->wait_reschange) {
+-    VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
+-    FRAME_Destory(thiz->mppframe);
+-    goto no_frame;
+-  }
++  GST_DEBUG_OBJECT (thiz, "wait_reschange: %d, flow_status: %s", thiz->wait_reschange, gst_flow_get_name (flow_status));
+ 
+-  GST_DEBUG_OBJECT (thiz, "start get oldest frame. req_ret: %d", req_ret);
++  // if (thiz->wait_reschange) {
++  //   VDEC_ReturnOutputFrame(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
++  //   FRAME_Destory(thiz->mppframe);
++  //   flow_status = GST_FLOW_OK;
++  //   goto done;
++  // }
+ 
+   frame = gst_video_decoder_get_oldest_frame (decoder);
+   if (frame == NULL) {
+     GST_DEBUG_OBJECT (thiz, "get null frame (%d)", req_ret);
+     flow_status = gst_spacemitdec_fill_output_buffer (decoder, &outbuf);
+     if (flow_status != GST_FLOW_OK)
+-      goto fill_buffer_err;
++      goto done;
+ 
+     GST_DEBUG_OBJECT (thiz, "null frame, push buf %p of size %" G_GSIZE_FORMAT ", "
+         "PTS %" GST_TIME_FORMAT ", dur %" GST_TIME_FORMAT, outbuf,
+@@ -800,9 +873,10 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+     // frame->pts = GST_CLOCK_TIME_NONE;
+     // frame->dts = FRAME_GetPts(thiz->mppframe);
+     flow_status = gst_spacemitdec_fill_output_buffer (decoder, &frame->output_buffer);
+-    if (flow_status != GST_FLOW_OK)
+-      goto fill_buffer_err;
+-
++    if (flow_status != GST_FLOW_OK) {
++      gst_video_codec_frame_unref (frame);
++      goto done;
++    }
+     // const gchar *user_clk_choice;
+ 
+     // user_clk_choice = g_getenv ("GST_CLK_CHOICE");
+@@ -820,85 +894,57 @@ gst_spacemitdec_loop (GstVideoDecoder * decoder)
+         GST_TIME_ARGS (frame->dts));
+     flow_status = gst_video_decoder_finish_frame(decoder, frame);
+   }
+-
+-  if (flow_status == GST_FLOW_EOS) {
+-    goto finish_work;
+-  } else if (flow_status == GST_FLOW_FLUSHING) {
+-    goto flushing;
+-  } else if (flow_status != GST_FLOW_OK) {
+-    goto error_flow;
++  // if (thiz->cur_frame_number < 3) {
++  //   thiz->downstream_flow_ret = flow_status;
++  //   GST_SPACEMITDEC_BROADCAST(thiz);
++  // }
++  thiz->finish_frames++;
++  {
++    GST_DEBUG_OBJECT (thiz, "request frame return (%s), finish frame return %s (%u, %u)", gst_flow_get_name(req_ret), gst_flow_get_name(flow_status), thiz->handle_frames, thiz->finish_frames);
+   }
+ 
+-  thiz->downstream_flow_ret = flow_status;
+-  
+ done:
++  thiz->downstream_flow_ret = flow_status;
++  // if ((thiz->cur_frame_number < 1 && !thiz->wait_reschange) || \
++  //     (thiz->cur_frame_number < 1 && req_ret == GST_FLOW_OK)) {
++  //   GST_SPACEMITDEC_BROADCAST(thiz);
++  // }
++
++  if (thiz->downstream_flow_ret == GST_FLOW_FLUSHING) {  //FLUSHING flow
++    thiz->flushing = TRUE;
++    while (1) {
++      frame = gst_video_decoder_get_oldest_frame (decoder);
++      if (frame == NULL)
++        break;
++      gst_video_decoder_release_frame (decoder, frame);
++    }
++    GST_INFO_OBJECT (thiz, "flushing spacemit decoder");
++  } else if (thiz->downstream_flow_ret == GST_FLOW_EOS) {  //EOS flow
++
++    thiz->status = DECODER_EOS;
++    GST_INFO_OBJECT (thiz, "spacemit decoder got EOS");
++  } else if (thiz->downstream_flow_ret == GST_FLOW_ERROR) {  //ERROR flow
++    GST_ERROR_OBJECT (thiz, "flow status ERROR");
++  } else if (thiz->downstream_flow_ret == GST_FLOW_NOT_NEGOTIATED) {  //not-negotiated flow
++    GST_WARNING_OBJECT (thiz, "not-negotiated flow status: %d", thiz->downstream_flow_ret);
++  } else if (thiz->downstream_flow_ret != GST_FLOW_OK) {  //other flow
++    GST_WARNING_OBJECT (thiz, "unsupport handle flow status: %d", thiz->downstream_flow_ret);
++  }
++
+   if (thiz->downstream_flow_ret != GST_FLOW_OK) {
+     GST_INFO_OBJECT (thiz,  "pause task in dec loop (%d)!", thiz->downstream_flow_ret);
+     gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (thiz));
++    GST_SPACEMITDEC_BROADCAST(thiz);
+   }
+-	return;
+-
+-flushing:
+-{
+-  thiz->flushing = TRUE;
+-  thiz->downstream_flow_ret = GST_FLOW_FLUSHING;
+-
+-  while (1) {
+-    frame = gst_video_decoder_get_oldest_frame (decoder);
+-    if(frame == NULL)
+-      break;
+-    gst_video_decoder_release_frame (decoder, frame);
+-  }
+-  GST_INFO_OBJECT (thiz, "flushing spacemit decoder");
+-
+-  goto done;
+-}
+-
+-no_frame:
+-{
+-  thiz->downstream_flow_ret = GST_FLOW_OK;
+-  goto done;
+-}
+ 
+-fill_buffer_err:
+-{
+-  GST_ERROR_OBJECT (thiz, "fill buffer err, flow status: %d!", flow_status);
+-  thiz->downstream_flow_ret = flow_status;
+-  gst_video_codec_frame_unref (frame);
+-  goto done;
+-}
+-
+-finish_work:
+-{
+-  GST_DEBUG_OBJECT (thiz, "get eos(%d, %d), finish work and pause task!", req_ret, flow_status);
+-  thiz->downstream_flow_ret = GST_FLOW_EOS;
+-  goto done;
+-}
+-
+-error_flow:
+-{
+-  thiz->downstream_flow_ret = flow_status;
+-  GST_ERROR_OBJECT (thiz, "unsupport flow status return: %d", flow_status);
+-  goto done;
+-}
++	return;
+ }
+ 
+ static gboolean
+-gst_spacemitdec_set_src_caps (GstSpacemitDec * thiz)
++gst_spacemitdec_set_src_caps (GstSpacemitDec * thiz, guint width, guint height, GstVideoFormat format)
+ {
+   GstVideoCodecState *output_state;
+   GstVideoInfo *vinfo;
+-  GstVideoFormat format;
+-  guint width, height;
+-
+-  width = thiz->ctx->stVdecPara.nWidth;
+-  height = thiz->ctx->stVdecPara.nHeight;
+-
+-  format = mpp_format_change_to_gst(thiz->eOutputPixelFormat);
+-  if (format == GST_VIDEO_FORMAT_UNKNOWN) {
+-    GST_ERROR_OBJECT(thiz, "error! no support PixelFormat, format: %s", gst_video_format_to_string (format));
+-    return FALSE;
+-  }
+ 
+   output_state =
+       gst_video_decoder_set_output_state (GST_VIDEO_DECODER (thiz),
+@@ -917,7 +963,42 @@ gst_spacemitdec_set_src_caps (GstSpacemitDec * thiz)
+ 
+   return TRUE;
+ }
++static gboolean gst_spacemitdec_negotiate (GstSpacemitDec * thiz)
++{
++  GstVideoFormat format;
++  guint width, height;
++  GstVideoCodecState *outstate;
++  GstVideoInfo *info = NULL;
+ 
++  width = thiz->ctx->stVdecPara.nWidth;
++  height = thiz->ctx->stVdecPara.nHeight;
++
++  format = mpp_format_change_to_gst(thiz->eOutputPixelFormat);
++  if (format == GST_VIDEO_FORMAT_UNKNOWN) {
++    GST_ERROR_OBJECT(thiz, "error! no support PixelFormat, format: %s", gst_video_format_to_string (format));
++    return FALSE;
++  }
++
++  /* Compare to currently configured output state */
++  outstate = gst_video_decoder_get_output_state (GST_VIDEO_DECODER (thiz));
++  if (outstate) {
++    info = &outstate->info;
++
++    if (width == GST_VIDEO_INFO_WIDTH (info) &&
++        height == GST_VIDEO_INFO_HEIGHT (info) &&
++        format == GST_VIDEO_INFO_FORMAT (info)) {
++      gst_video_codec_state_unref (outstate);
++      return TRUE;
++    }
++    gst_video_codec_state_unref (outstate);
++  }
++
++  GST_DEBUG_OBJECT (thiz, "set src caps: (%d, %d, %s)", width, height, gst_video_format_to_string (format));
++  gst_spacemitdec_set_src_caps (thiz, width, height, format);
++
++  GST_DEBUG_OBJECT (thiz, "start negotiate");
++  return gst_video_decoder_negotiate (GST_VIDEO_DECODER (thiz));
++}
+ static gint32 gst_spacemitdec_vdec_decode (GstSpacemitDec * thiz, GstMapInfo *map_info, gint64 pts)
+ {
+   gint32 ret;
+@@ -942,7 +1023,7 @@ static gint32 gst_spacemitdec_vdec_decode (GstSpacemitDec * thiz, GstMapInfo *ma
+       if (count >= 2 && count < MAX_POLL_TIME) {
+         g_usleep(500);
+       } else if (count >= MAX_POLL_TIME) {
+-        GST_ERROR_OBJECT (thiz, "try max times: %u, fail return(%d)", MAX_POLL_TIME, ret);
++        GST_ERROR_OBJECT (thiz, "try max times: %u ms, fail return(%d)", MAX_POLL_TIME / 2, ret);
+         ret = MPP_POLL_FAILED;
+         break;
+       }
+@@ -955,114 +1036,129 @@ static gint32 gst_spacemitdec_vdec_decode (GstSpacemitDec * thiz, GstMapInfo *ma
+   return ret;
+ }
+ 
+-static GstFlowReturn
+-gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
+-    GstVideoCodecFrame * frame)
++static GstFlowReturn gst_spacemitdec_decode_one_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC (decoder);
++  gint32 ret;
+   GstMapInfo map_info;
+-  GstFlowReturn flow_status;
+-  guint actual_width, actual_height;
+-  GstFlowReturn ret;
+-
+-  if (G_UNLIKELY (thiz->flushing))
+-    goto flushing;
+-
+-  if (G_UNLIKELY(thiz->downstream_flow_ret != GST_FLOW_OK))
+-    goto downstream_err;
+ 
+   if (G_LIKELY(frame)) {
+-    thiz->cur_frame_number = frame->system_frame_number;
+     GST_DEBUG_OBJECT (thiz, "handle frame %p, snb:%u, input buffer pts: %"  GST_TIME_FORMAT ", dts %" GST_TIME_FORMAT,
+         frame, frame->system_frame_number, GST_TIME_ARGS (GST_BUFFER_PTS (frame->input_buffer)),
+         GST_TIME_ARGS (GST_BUFFER_DTS (frame->input_buffer)));
+ 
+-    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+-    if (!gst_buffer_map (frame->input_buffer, &map_info, GST_MAP_READ))
+-      goto map_err;
++    thiz->status = DECODER_WORKING;
++    thiz->cur_frame_number = frame->system_frame_number;
+ 
+-    ret = gst_spacemitdec_vdec_decode (thiz, &map_info, GST_BUFFER_DTS (frame->input_buffer));
++    if (!gst_buffer_map (frame->input_buffer, &map_info, GST_MAP_READ)) {
++      GST_ERROR_OBJECT (thiz, "map input buffer failed!");
++      return GST_FLOW_ERROR;
++    }
+ 
++    ret = gst_spacemitdec_vdec_decode (thiz, &map_info, GST_BUFFER_DTS (frame->input_buffer));
+     gst_buffer_unmap (frame->input_buffer, &map_info);
+ 
+-    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+-
+     if (ret) {
+-      GST_ERROR_OBJECT (thiz, "VDEC_Decode return error! (%d)", ret);
+-      ret = gst_video_decoder_drop_frame (decoder, frame);
+-      goto out;
++      GST_ELEMENT_ERROR (thiz, STREAM, DECODE, ("Could not decode frame"), ("VDEC_Decode return %d", ret));
++      return GST_FLOW_ERROR;
++    } else {
++      return GST_FLOW_OK;
+     }
+-    gst_video_codec_frame_unref (frame);
+    } else {
+-    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+     ret = gst_spacemitdec_vdec_decode (thiz, NULL, GST_CLOCK_TIME_NONE);
+     GST_DEBUG_OBJECT (thiz, "in dec handle else, %d!", ret);
+     thiz->cur_frame_number = -1;
+-    ret = GST_FLOW_EOS;
+-    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
++	  thiz->status = DECODER_EOS;
+ 
+-    goto out;
++    return GST_FLOW_EOS;
+   }
+-  actual_width = thiz->ctx->stVdecPara.nWidth;
+-  actual_height = thiz->ctx->stVdecPara.nHeight;
++}
++static GstFlowReturn
++gst_spacemitdec_handle_frame (GstVideoDecoder * decoder,
++    GstVideoCodecFrame * frame)
++{
++  GstSpacemitDec *thiz = GST_SPACEMITDEC (decoder);
++  GstMapInfo map_info;
++  GstFlowReturn flow_status;
++  // guint actual_width, actual_height;
++  GstFlowReturn ret;
+ 
+-  if (!gst_pad_has_current_caps (GST_VIDEO_DECODER_SRC_PAD (thiz))
+-      || actual_width != thiz->width
+-      || actual_height != thiz->height) {
++  if (G_UNLIKELY (thiz->flushing))
++    goto flushing;
++
++  if (G_UNLIKELY(thiz->downstream_flow_ret != GST_FLOW_OK))
++    goto downstream;
+ 
+-    if (!gst_spacemitdec_set_src_caps (thiz))
+-      goto not_negotiated_err;
++  // if (thiz->status == DECODER_EOS) {
++  //   GST_DEBUG_OBJECT (thiz, "finish with eos");
++  //   flow_status = GST_FLOW_OK;
++  //   goto out;
++  // }
+ 
+-    GST_DEBUG_OBJECT (thiz, "start negotiate, (%d, %d, %d)", actual_width, actual_height, thiz->eOutputPixelFormat);
++  if (!gst_spacemitdec_negotiate(thiz))
++    goto negotiated_err;
+ 
+-    if (!gst_video_decoder_negotiate (decoder))
+-      goto not_negotiated_err;
+-  }
++  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
++  flow_status = gst_spacemitdec_decode_one_frame (decoder, frame);
++  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
++
++  if (flow_status == GST_FLOW_ERROR)
++    goto decoder_err;
++  else if (flow_status == GST_FLOW_EOS)
++    goto out;
++
++  if (G_LIKELY(frame))
++    gst_video_codec_frame_unref (frame);
+ 
++  // need restart after totem seek (gst_spacemitdec_flush)
+   if (G_UNLIKELY (!gst_pad_get_task_state ((decoder)->srcpad) == GST_TASK_STARTED) && !thiz->flushing) {
+     GST_DEBUG_OBJECT (thiz, "start dec thread");
+     gst_pad_start_task (decoder->srcpad,
+         (GstTaskFunction) gst_spacemitdec_loop, decoder, NULL);
+   }
+ 
++  //before 3th frame, can block for finsh_frame return
++  // if (frame->system_frame_number < 1) {
++  //   GST_DEBUG_OBJECT (thiz, "wait finish frame, snd %d", frame->system_frame_number);
++  //   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
++  //   GST_SPACEMITDEC_WAIT (thiz);
++  //   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
++  // }
++  thiz->handle_frames++;
+   GST_DEBUG_OBJECT (thiz, "finish dec handle, %d", thiz->downstream_flow_ret);
+-  ret = thiz->downstream_flow_ret;
++  flow_status = thiz->downstream_flow_ret;
+ 
+ out:
+-  if (thiz->downstream_flow_ret == GST_FLOW_FLUSHING)
+-    ret = GST_FLOW_FLUSHING;
+-  return ret;
+-
+-out_clked:
+-  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+-  return ret;
++  return flow_status;
+ 
+-not_negotiated_err:
++decoder_err:
+ {
+-  GST_ERROR_OBJECT (thiz,
+-      "Failed to negotiate with downstream elements");
+-  ret = GST_FLOW_NOT_NEGOTIATED;
++  GST_ERROR_OBJECT (thiz, "decoder frame error!");
++  thiz->downstream_flow_ret = flow_status = GST_FLOW_ERROR;
++  if (G_LIKELY(frame))
++    gst_video_decoder_release_frame (decoder, frame);
+   goto out;
+ }
+-map_err:
++
++negotiated_err:
+ {
+-  GST_ERROR_OBJECT (thiz, "Cannot map input buffer!");
+-  gst_video_codec_frame_unref (frame);
+-  ret = GST_FLOW_ERROR;
+-  goto out_clked;
++  GST_ELEMENT_ERROR (thiz, CORE, NEGOTIATION,
++          ("Could not negotiate the stream"), (NULL));
++  flow_status = GST_FLOW_NOT_NEGOTIATED;
++  goto out;
+ }
+ 
+-downstream_err:
++downstream:
+ {
+-  GST_ERROR_OBJECT (thiz, "Downstream returned %s",
++  GST_WARNING_OBJECT (thiz, "Downstream returned %s",
+       gst_flow_get_name (thiz->downstream_flow_ret));
+-  ret = thiz->downstream_flow_ret;
++  flow_status = thiz->downstream_flow_ret;
+   goto out;
+ }
+ flushing:
+ {
+   GST_WARNING_OBJECT (thiz, "flushing");
+-  ret = GST_FLOW_FLUSHING;
++  flow_status = GST_FLOW_FLUSHING;
+   gst_video_decoder_release_frame (decoder, frame);
+   goto out;
+ }
+@@ -1264,6 +1360,9 @@ drop_frame:
+   return GST_FLOW_OK;
+ }
+ 
++//totem restart : eos event -> finish wait -> loop finish frame && eos -> finish end
++// -> seek event -> flush -> (handle frame <-> loop)
++
+ static GstFlowReturn gst_spacemitdec_finish(GstVideoDecoder * decoder)
+ {
+   GstSpacemitDec *thiz = GST_SPACEMITDEC(decoder);
+@@ -1369,6 +1468,7 @@ gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transitio
+ 
+   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+     if (gst_pad_get_task_state (decoder->srcpad) == GST_TASK_STARTED) {
++      thiz->status = DECODER_NEED_EXIT_WORK;  //for change res, loop thread request frame blocking exit
+       GST_DEBUG_OBJECT (thiz, "pause decoding thread, %s", gst_element_state_get_name (GST_STATE (GST_ELEMENT (thiz))));
+       gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (thiz));
+       GST_DEBUG_OBJECT (thiz, "pause decoding thread SUCCESS");
+@@ -1380,6 +1480,14 @@ gst_spacemitdec_dec_change_state (GstElement * element, GstStateChange transitio
+       GST_DEBUG_OBJECT (thiz, "stopping decoding thread SUCCESS");
+     }
+   }
++  // if (transition == GST_STATE_CHANGE_PAUSED_TO_PLAYING) {
++  //   if (gst_pad_get_task_state (decoder->srcpad) != GST_TASK_STARTED) {
++  //     GST_DEBUG_OBJECT (thiz, "start dec thread");
++  //     gst_pad_start_task (decoder->srcpad,
++  //         (GstTaskFunction) gst_spacemitdec_loop, decoder, NULL);
++  //     GST_DEBUG_OBJECT (thiz, "start dec thread SUCCESS");
++  //   }
++  // }
+ 
+   return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+ }
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.h b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+index 068cbd9..3de7507 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.h
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.h
+@@ -39,15 +39,17 @@ typedef struct _GstSpacemitDecClass GstSpacemitDecClass;
+ 
+ typedef enum
+ {
+-  GST_SPACEMIT_DEC_INVAILD = -1,
++  DECODER_INVALID = -1,
+ 
+-  GST_SPACEMIT_DEC_INIT = 0,
+-  GST_SPACEMIT_DEC_START,
+-  GST_SPACEMIT_DEC_STOP,
+-  GST_SPACEMIT_DEC_FINALIZE,
++  DECODER_CREATE = 0,
++  DECODER_INIT,
++  DECODER_WORKING,
++  DECODER_NEED_EXIT_WORK,
++  DECODER_EOS,
++  DECODER_DESTORY,
+ 
+-  GST_SPACEMIT_DEC_MAX,
+-} SpacemitStatus;
++  DECODER_STATUS_MAX,
++} SpacemitDecodecStatus;
+ 
+ struct _GstSpacemitDec
+ {
+@@ -64,15 +66,18 @@ struct _GstSpacemitDec
+   guint eCodingType;
+   MppPixelFormat eOutputPixelFormat;
+   guint downscale;
++  guint buffertype;
+ 
+   GstVideoCodecState *input_state;
+   GstFlowReturn downstream_flow_ret;
+-  SpacemitStatus status;
++  SpacemitDecodecStatus status;
+   guint32 cur_frame_number;	/* ED */
++  guint32 handle_frames;
++  guint32 finish_frames;
+   GstVideoInfo out_info;
+   /* stop handling new frame when flushing */
+   gboolean flushing;
+-  gboolean use_dmabuf;
++  gboolean dec_parse;
+   gboolean initialized;
+   gboolean dec_nonblock;
+   gboolean req_nonblock;
+@@ -80,6 +85,8 @@ struct _GstSpacemitDec
+   gboolean wait_reschange;
+   GstBufferPool *pool;
+   FILE *fb;
++  pthread_mutex_t finish_mtx;
++  pthread_cond_t finish_cond;
+ 
+   /* parse state */
+   gboolean saw_header;
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitenc.c b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+index f29cbaa..eac2426 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitenc.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitenc.c
+@@ -10,8 +10,9 @@
+ #include <gst/video/video.h>
+ #include <gst/video/gstvideoencoder.h>
+ #include <string.h>
+-#define SPM_PENDING_MAX 5       /* Max number of MPP pending frame */
++#define SPM_PENDING_MAX 11       /* Max number of MPP pending frame */
+ #define PACKET_SIZE (2 * 1024 * 1024)
++#define MPP_ENCODER_FRAME_MAX 12
+ 
+ GST_DEBUG_CATEGORY_STATIC (gst_spacemitenc_debug_category);
+ #define GST_CAT_DEFAULT gst_spacemitenc_debug_category
+@@ -46,10 +47,11 @@ static gboolean gst_spacemitenc_propose_allocation (GstVideoEncoder * encoder,
+ #define DEFAULT_NUM_SLICES      1
+ #define DEFAULT_QP_MIN             0
+ #define DEFAULT_QP_MAX             51
++#define DEFAULT_PRESET 0
+ 
+ #define GST_SPM_ENC_EVENT_MUTEX(encoder) (&GST_SPACEMITENC (encoder)->event_mutex)
+ #define GST_SPM_ENC_EVENT_COND(encoder) (&GST_SPACEMITENC (encoder)->event_cond)
+-#define MAX_POLL_TIME 0xffffffff
++#define MAX_POLL_TIME 0xffff
+ 
+ #define GST_SPM_ENC_BROADCAST(encoder) \
+   g_mutex_lock (GST_SPM_ENC_EVENT_MUTEX (encoder)); \
+@@ -84,19 +86,10 @@ enum
+   PROP_CODING_TYPE,
+   PROP_CODE_TYPE,
+   PROP_CODE_YUV_FORMAT,
++  PROP_PRESET,
+   N_PROPERTIES
+ };
+ 
+-#ifndef GST_CAPS_FEATURE_MEMORY_DMABUF
+-#define GST_CAPS_FEATURE_MEMORY_DMABUF "memory:DMABuf"
+-#endif
+-
+-#define SPM_ENC_IN_FORMATS "I420, NV21, NV12"
+-#define SPM_ENC_FORMATS SPM_ENC_IN_FORMATS
+-#define SPM_ENC_CAPS_MAKE(fmts) \
+-    GST_VIDEO_CAPS_MAKE (fmts) ";" \
+-    GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_MEMORY_DMABUF, fmts)
+-
+ /* pad templates */
+ 
+ static GstStaticPadTemplate gst_spacemitenc_sink_template =
+@@ -129,7 +122,7 @@ GST_STATIC_PAD_TEMPLATE ("src",
+     "parsed = (boolean) true,"
+     "systemstream = (boolean) false"
+     ";"
+-    "image/jpeg"
++    "image/jpeg,"
+     ";"
+     "video/x-vp8"
+     ";"
+@@ -139,20 +132,49 @@ GST_STATIC_PAD_TEMPLATE ("src",
+ /* class initialization */
+ G_DEFINE_TYPE(GstSpacemitEnc, gst_spacemitenc, GST_TYPE_VIDEO_ENCODER);
+ 
++#define GST_TYPE_SPACEMITENC_PRESET (gst_spacemitenc_preset_get_type())
++static GType
++gst_spacemitenc_preset_get_type (void)
++{
++  static GType preset_type = 0;
++
++  static const GEnumValue presets[] = {
++    {GST_SPACEMIT_PRESET_DEFAULT, "Default", "default"},
++    // {GST_SPACEMIT_PRESET_HP, "High Performance", "hp"},
++//     {GST_SPACEMIT_PRESET_HQ, "High Quality", "hq"},
++// /*    {GST_NV_PRESET_BD, "BD", "bd"}, */
++//     {GST_SPACEMIT_PRESET_LOW_LATENCY_DEFAULT, "Low Latency", "low-latency"},
++//     {GST_SPACEMIT_PRESET_LOW_LATENCY_HQ, "Low Latency, High Quality",
++//         "low-latency-hq"},
++//     {GST_SPACEMIT_PRESET_LOW_LATENCY_HP, "Low Latency, High Performance",
++//         "low-latency-hp"},
++//     {GST_SPACEMIT_PRESET_LOSSLESS_DEFAULT, "Lossless", "lossless"},
++//     {GST_SPACEMIT_PRESET_LOSSLESS_HP, "Lossless, High Performance", "lossless-hp"},
++    {0, NULL, NULL},
++  };
++
++  if (!preset_type) {
++    preset_type = g_enum_register_static ("GstSpacemitPreset", presets);
++  }
++  return preset_type;
++}
++
+ static void
+ gst_spacemitenc_class_init (GstSpacemitEncClass * klass)
+ {
+   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+   GstVideoEncoderClass *video_encoder_class = GST_VIDEO_ENCODER_CLASS (klass);
+ 
+-  gst_element_class_add_static_pad_template (GST_ELEMENT_CLASS (klass),
+-      &gst_spacemitenc_src_template);
+-  gst_element_class_add_static_pad_template (GST_ELEMENT_CLASS (klass),
+-      &gst_spacemitenc_sink_template);
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitenc", 0,
++          "debug category for spacemitenc element");
++  // gst_element_class_add_static_pad_template (GST_ELEMENT_CLASS (klass),
++  //     &gst_spacemitenc_src_template);
++  // gst_element_class_add_static_pad_template (GST_ELEMENT_CLASS (klass),
++  //     &gst_spacemitenc_sink_template);
+ 
+-  gst_element_class_set_static_metadata (GST_ELEMENT_CLASS (klass),
+-      "Spacemit video encoder", "Encoder/Video", "Spacemit video encoder",
+-      "ZRong, zhirong.li@spacemit.com");
++  // gst_element_class_set_static_metadata (GST_ELEMENT_CLASS (klass),
++  //     "Spacemit video encoder", "Encoder/Video", "Spacemit video encoder",
++  //     "ZRong, zhirong.li@spacemit.com");
+ 
+   gobject_class->set_property = gst_spacemitenc_set_property;
+   gobject_class->get_property = gst_spacemitenc_get_property;
+@@ -193,6 +215,13 @@ gst_spacemitenc_class_init (GstSpacemitEncClass * klass)
+           "ENcode the yuv format",
+           PIXEL_FORMAT_UNKNOWN, PIXEL_FORMAT_MAX - 1, PIXEL_FORMAT_I420,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++  g_object_class_install_property (gobject_class, PROP_PRESET,
++      g_param_spec_enum ("preset", "Encoding Preset",
++          "Encoding Preset",
++          GST_TYPE_SPACEMITENC_PRESET, GST_SPACEMIT_PRESET_DEFAULT,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING |
++          G_PARAM_STATIC_STRINGS));
++  gst_type_mark_as_plugin_api (GST_TYPE_SPACEMITENC_PRESET, 0);
+ }
+ 
+ static void
+@@ -228,6 +257,7 @@ gst_spacemitenc_init (GstSpacemitEnc * thiz)
+   thiz->para = NULL;
+   thiz->mppframe = NULL;
+   thiz->mpppacket = NULL;
++  thiz->mpppacket_pner = NULL;
+ }
+ 
+ void
+@@ -247,7 +277,6 @@ gst_spacemitenc_set_property (GObject * object, guint property_id,
+       }
+       GST_OBJECT_UNLOCK (thiz);
+       break;
+-
+     case PROP_MAX_BITRATE:
+       GST_OBJECT_LOCK (thiz);
+       if (thiz->max_bitrate != g_value_get_uint (value)) {
+@@ -277,9 +306,7 @@ gst_spacemitenc_set_property (GObject * object, guint property_id,
+       break;
+     case PROP_GOP_SIZE:
+       thiz->gop_size = g_value_get_uint (value);
+-      GST_DEBUG_OBJECT (thiz, "ZRong ------------------- set_property: %d", thiz->gop_size);
+       break;
+-
+     case PROP_MAX_SLICE_SIZE:
+       thiz->max_slice_size = g_value_get_uint (value);
+       break;
+@@ -312,6 +339,8 @@ gst_spacemitenc_set_property (GObject * object, guint property_id,
+     case PROP_CODE_YUV_FORMAT:
+       thiz->PixelFormat = g_value_get_uint (value);
+       break;
++    case PROP_PRESET:
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+       break;
+@@ -354,9 +383,7 @@ gst_spacemitenc_get_property (GObject * object, guint property_id,
+     case PROP_MULTI_THREAD:
+       g_value_set_uint (value, thiz->multi_thread);
+       break;
+-
+     case PROP_GOP_SIZE:
+-      GST_DEBUG_OBJECT (thiz, "ZRong ------------------- gop_size: %d", thiz->gop_size);
+       g_value_set_uint (value, thiz->gop_size);
+       break;
+     case PROP_MAX_SLICE_SIZE:
+@@ -389,6 +416,8 @@ gst_spacemitenc_get_property (GObject * object, guint property_id,
+     case PROP_CODE_YUV_FORMAT:
+       g_value_set_uint (value, thiz->PixelFormat);
+       break;
++    case PROP_PRESET:
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+       break;
+@@ -410,7 +439,7 @@ gst_spacemitenc_finalize (GObject * object)
+ 
+   G_OBJECT_CLASS (gst_spacemitenc_parent_class)->finalize (object);
+ }
+-FILE *fbbb;
++// FILE *fbbb;
+ 
+ static gboolean
+ gst_spacemitenc_start (GstVideoEncoder * encoder)
+@@ -420,15 +449,9 @@ gst_spacemitenc_start (GstVideoEncoder * encoder)
+ 
+   GST_DEBUG_OBJECT (thiz, "start");
+ 
+-  if(thiz->ctx)
+-	{
+-		VENC_DestoryChannel(thiz->ctx);
+-		thiz->ctx = NULL;
+-	}
+ 	thiz->ctx = VENC_CreateChannel();
+   if (!thiz->ctx)
+     goto alloc_err;
+-  // thiz->ctx->eCodecType = thiz->eCodecType;
+ 
+   thiz->mpppacket = PACKET_Create ();
+   if (!thiz->mpppacket)
+@@ -441,9 +464,12 @@ gst_spacemitenc_start (GstVideoEncoder * encoder)
+ 
+   g_mutex_init (&thiz->event_mutex);
+   g_cond_init (&thiz->event_cond);
++
+   thiz->bufs_hash = g_hash_table_new (g_direct_hash, g_direct_equal);
+   thiz->pending_frames = 0;
+-  fbbb = fopen("/tmp/out.yuv", "ab+");
++  thiz->downstream_flow_ret = GST_FLOW_OK;
++  thiz->frame_count = 0;
++  // fbbb = fopen("/tmp/out.yuv", "ab+");
+ 
+   GST_DEBUG_OBJECT (thiz, "finish start");
+   return TRUE;
+@@ -459,45 +485,39 @@ gst_spacemitenc_stop (GstVideoEncoder * encoder)
+   GstSpacemitEnc *thiz = GST_SPACEMITENC (encoder);
+ 
+   GST_DEBUG_OBJECT (thiz, "stop");
+-  fclose(fbbb);
++  // fclose(fbbb);
+ 
+-  if(thiz->ctx)
+-	{
+-		VENC_DestoryChannel(thiz->ctx);
+-		thiz->ctx = NULL;
+-	}
+   FRAME_Destory(thiz->mppframe);
+   PACKET_Destory(thiz->mpppacket);
+   VENC_DestoryChannel(thiz->ctx);
+-
++  thiz->ctx = NULL;
+   if (thiz->input_state) {
+     gst_video_codec_state_unref (thiz->input_state);
+   }
+   thiz->input_state = NULL;
+-  if (!(gst_pad_get_task_state ((encoder)->srcpad) == GST_TASK_STARTED))
++  if (!(gst_pad_get_task_state (encoder->srcpad) == GST_TASK_STARTED))
+     return TRUE;
+ 
+-  GST_DEBUG_OBJECT (thiz, "finish stop");
+-
+   gst_pad_stop_task (encoder->srcpad);
+   g_cond_clear (&thiz->event_cond);
+   g_mutex_clear (&thiz->event_mutex);
++  GST_DEBUG_OBJECT (thiz, "finish stop");
+ 
+   return TRUE;
+ }
+ 
+ //建立input buffer与mppframe id间的hash关系
+-void setup_gstbuffer_and_mppframe_hash (GstSpacemitEnc * thiz, gint mppframe_id, GstBuffer *input_buffer)
++void setup_input_buffer_and_mppframe_hash (GstSpacemitEnc * thiz, gint mppframe_id, GstBuffer *input_buffer)
+ {
+   gst_buffer_ref (input_buffer);
+   g_hash_table_insert (thiz->bufs_hash, GINT_TO_POINTER(mppframe_id), input_buffer);
+ 
+-  GST_DEBUG_OBJECT (thiz, "hash had:%u bufs now, after add. buf %p ref:%d",
++  GST_DEBUG_OBJECT (thiz, "hash had:%u bufs now(after add). buf %p ref:%d",
+     g_hash_table_size(thiz->bufs_hash), input_buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(input_buffer));
+ }
+ 
+ //从al_enc_return_input_frame接口或者当前可以release的buffer
+-gint try_to_release_upstream_buffer (GstSpacemitEnc * thiz)
++gint try_to_release_upstream_buffer (GstSpacemitEnc * thiz, gint *mppframe_id)
+ {
+   gint id;
+   GstBuffer *buffer;
+@@ -512,13 +532,17 @@ gint try_to_release_upstream_buffer (GstSpacemitEnc * thiz)
+           buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(buffer), g_hash_table_size(thiz->bufs_hash), id);
+         g_hash_table_remove(thiz->bufs_hash, GINT_TO_POINTER(id));
+         gst_buffer_unref (buffer);
++        break;
+       } else {
+         ret = FALSE;
+         GST_ERROR_OBJECT (thiz, "fail to release upstream buf, id:%d", id);
+       }
+     }
+   } while (id != -1);
+-  // g_hash_table_foreach (thiz->bufs_hash, release_gst_buffer, thiz)
++
++  if (ret == TRUE) {
++    *mppframe_id = id;
++  }
+ 
+   return ret;
+ }
+@@ -533,19 +557,20 @@ release_all_buffer (gpointer key, gpointer value, gpointer user_data)
+   gst_buffer_unref (buffer);
+ }
+ 
+-//eos发生，查询hash是否还剩映射，清零方能退出
+ static void drain_all_upstream_buffer (GstSpacemitEnc * thiz)
+ {
+   gint sum;
+   gint try_count = 0;
++  gint mppframe_id;
+ 
++  //eos发生，查询hash是否还剩映射，清零方能退出
+   do {
+-    try_to_release_upstream_buffer(thiz);
++    try_to_release_upstream_buffer(thiz, &mppframe_id);
+     sum = g_hash_table_size(thiz->bufs_hash);
+     GST_DEBUG_OBJECT (thiz, "hash had:%u bufs now, in drain", sum);
+ 
+     g_usleep(1000);
+-  } while (++try_count < 10);
++  } while (++try_count < 10 && sum);
+ 
+   GST_DEBUG_OBJECT (thiz, "hash had:%u bufs now, after drain. try times: %d",
+     g_hash_table_size(thiz->bufs_hash), try_count);
+@@ -554,29 +579,83 @@ static void drain_all_upstream_buffer (GstSpacemitEnc * thiz)
+   g_hash_table_remove_all (thiz->bufs_hash);
+ }
+ 
+-static gint32 gst_spacemitenc_request_packet (GstSpacemitEnc *thiz)
++void copy_mpppacket_to_gstbuffer(GstSpacemitEnc *thiz, GstBuffer *output_buffer, gint msize, gint mpsize)
++{
++  GstMapInfo map;
++
++  gst_buffer_map (output_buffer, &map, GST_MAP_WRITE);
++
++  memcpy (map.data, PACKET_GetDataPointer(thiz->mpppacket), msize);
++  if (thiz->eCodingType == CODING_VP8 || thiz->eCodingType == CODING_VP9)
++    memcpy (map.data + msize, PACKET_GetDataPointer(thiz->mpppacket_pner), mpsize);
++
++  gst_buffer_unmap (output_buffer, &map);
++ }
++
++static gint32 gst_spacemitenc_request_packet (GstSpacemitEnc *thiz, gint *msize, gint *mpsize)
+ {
+   gint32 ret;
+-  static guint count = 0;
++  guint count = 0;
++  MppPacket *mpppacket;
+ 
++  mpppacket = thiz->mpppacket;
+   do {
+-    // ret = VENC_RequestOutputStreamBuffer(thiz->ctx, PACKET_GetBaseData(thiz->mpppacket));
+-    ret = VENC_GetOutputStreamBuffer (thiz->ctx, PACKET_GetBaseData(thiz->mpppacket));
++    ret = VENC_GetOutputStreamBuffer (thiz->ctx, PACKET_GetBaseData(mpppacket));
+     if (ret != MPP_CODER_NO_DATA) {
+       break;
+     } else {
+       if (count >= 2 && count < MAX_POLL_TIME) {
+         g_usleep(500);
+       } else if (count >= MAX_POLL_TIME) {
+-        GST_ERROR_OBJECT (thiz, "try max times: %u, fail return(%d)", MAX_POLL_TIME, ret);
++        GST_ERROR_OBJECT (thiz, "try max times: %u ms, fail return(%d)", MAX_POLL_TIME / 2, ret);
+         ret = MPP_POLL_FAILED;
+-        break;
++        goto out;
+       }
+     }
+     count++;
+   } while (1);
+ 
+-  count = 0;
++  if (ret == MPP_CODER_EOS) {
++    *mpsize = 0;
++    goto out;
++  }
++
++  *msize = PACKET_GetLength(mpppacket);
++
++  if (thiz->eCodingType == CODING_VP8 || thiz->eCodingType == CODING_VP9) {
++    mpppacket = thiz->mpppacket_pner;
++    count = 0;
++    do {
++      ret = VENC_GetOutputStreamBuffer (thiz->ctx, PACKET_GetBaseData(mpppacket));
++      if (ret != MPP_CODER_NO_DATA) {
++        break;
++      } else {
++        if (count >= 2 && count < MAX_POLL_TIME) {
++          g_usleep(500);
++        } else if (count >= MAX_POLL_TIME) {
++          GST_ERROR_OBJECT (thiz, "try max times: %u ms, parner fail return(%d)", MAX_POLL_TIME / 2, ret);
++          ret = MPP_POLL_FAILED;
++          goto out;
++        }
++      }
++      count++;
++    } while (1);
++
++    *mpsize = PACKET_GetLength(mpppacket);
++  } else {
++    *mpsize = 0;
++  }
++
++out:
++  if (ret == MPP_CODER_EOS) {
++    GST_INFO_OBJECT (thiz, "VENC_GetOutputStreamBuffer return: MPP_CODER_EOS (%d)", ret);
++    ret = GST_FLOW_EOS;
++  } else if (ret == MPP_POLL_FAILED) {
++    ret = GST_FLOW_ERROR;
++  } else if (ret != MPP_OK) {
++    GST_WARNING_OBJECT (thiz, "VENC_GetOutputStreamBuffer other return: (%d) ?", ret);
++    ret = GST_FLOW_OK;
++  }
+ 
+   return ret;
+ }
+@@ -587,92 +666,57 @@ gst_spacemitenc_loop (GstVideoEncoder * encoder)
+   GstVideoCodecFrame * frame = NULL;
+   GstSpacemitEnc *thiz = GST_SPACEMITENC (encoder);
+   gint ret;
++  gint msize = 0, mpsize = 0;
+   GstFlowReturn flow_status;
+   GstMapInfo map;
+   static gint lenght = 0;
+ 
+-  ret = gst_spacemitenc_request_packet(thiz);
+-  if (ret == MPP_CODER_NO_DATA)
+-    goto err_packet;
+-  else if (ret == MPP_CODER_EOS)
+-    goto finish_work;
+-  else if (ret != MPP_OK)
+-    goto err_packet;
++  ret = gst_spacemitenc_request_packet(thiz, &msize, &mpsize);
++  if (ret == GST_FLOW_EOS || ret == GST_FLOW_ERROR) {
++    flow_status = ret;
++    goto done;
++  }
+ 
+-  // GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
++  GST_LOG_OBJECT (thiz, "VENC_GetOutputStreamBuffer return: %d, size:(%d, %d)", ret, msize, mpsize);
+ 
+   frame = gst_video_encoder_get_oldest_frame (encoder);
+   if (!frame) {
+     GST_WARNING_OBJECT (thiz, "get oldest frame with null");
+ 
+     GstBuffer *buffer;
+-    buffer = gst_video_encoder_allocate_output_buffer (encoder, PACKET_GetLength(thiz->mpppacket));
++    buffer = gst_video_encoder_allocate_output_buffer (encoder, msize + mpsize);
++    copy_mpppacket_to_gstbuffer (thiz, buffer, msize, mpsize);
+     flow_status = gst_pad_push (GST_VIDEO_ENCODER_SRC_PAD (thiz), buffer);
+-    // GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+-    if (flow_status == GST_FLOW_EOS) {
+-      goto finish_work;
+-    } else if (flow_status == GST_FLOW_OK) {
+-      goto done;
+-    } else {
+-      goto err_case;
+-    }
+-  }
++  } else {
++    GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
+ 
+-  GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
++    frame->output_buffer = gst_video_encoder_allocate_output_buffer (encoder, msize + mpsize);
++    copy_mpppacket_to_gstbuffer (thiz, frame->output_buffer, msize, mpsize);
+ 
+-  frame->output_buffer = gst_video_encoder_allocate_output_buffer (encoder, PACKET_GetLength(thiz->mpppacket));
+-  gst_buffer_map (frame->output_buffer, &map, GST_MAP_WRITE);
++    lenght += msize + mpsize;
++    GST_DEBUG_OBJECT (thiz, "loop finish frame %p, ref_count:%d, buf(%p, %p) ref:(%d, %d) (L: %d), pts:%ld",
++      frame, frame->ref_count, frame->input_buffer, frame->output_buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(frame->input_buffer),
++      GST_MINI_OBJECT_REFCOUNT_VALUE(frame->output_buffer), lenght, msize, PACKET_GetPts(thiz->mpppacket));
+ 
+-  memcpy (map.data, PACKET_GetDataPointer(thiz->mpppacket), PACKET_GetLength(thiz->mpppacket));
++    flow_status = gst_video_encoder_finish_frame (encoder, frame);
++  }
+ 
+-  gst_buffer_unmap (frame->output_buffer, &map);
+-  // GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
++  thiz->pending_frames--;
+ 
+-  lenght += PACKET_GetLength(thiz->mpppacket);
+-  if (frame->input_buffer)
+-    GST_DEBUG_OBJECT (thiz, "loop finish frame %p, ref_count:%d, buf(%p, %p) ref:(%d, %d) (%d, %d), pts:%ld",
+-      frame, frame->ref_count, frame->input_buffer, frame->output_buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(frame->input_buffer),
+-      GST_MINI_OBJECT_REFCOUNT_VALUE(frame->output_buffer), lenght, PACKET_GetLength(thiz->mpppacket), PACKET_GetPts(thiz->mpppacket));
+-  else
+-    GST_DEBUG_OBJECT (thiz, "loop finish frame %p, ref_count:%d, buf %p, ref:(%d) (%d, %d), pts:%ld",
+-      frame, frame->ref_count, frame->output_buffer, GST_MINI_OBJECT_REFCOUNT_VALUE(frame->output_buffer),
+-      lenght, PACKET_GetLength(thiz->mpppacket), PACKET_GetPts(thiz->mpppacket));
+-
+-  flow_status = gst_video_encoder_finish_frame (encoder, frame);
+-  if (flow_status == GST_FLOW_EOS) {
+-    goto finish_work;
+-  } else if (flow_status != GST_FLOW_OK) {
+-    goto err_case;
++done:
++  thiz->downstream_flow_ret = flow_status;
++  if (thiz->downstream_flow_ret == GST_FLOW_EOS) {  //EOS flow
++    drain_all_upstream_buffer(thiz);
++    gst_pad_pause_task (GST_VIDEO_ENCODER_SRC_PAD (thiz));
++    GST_DEBUG_OBJECT (thiz, "Get eos, Finish work and pause task!");
++  } else if (thiz->downstream_flow_ret == GST_FLOW_ERROR) {
++    //pass
++  } else if (thiz->downstream_flow_ret != GST_FLOW_OK) {  //other flow
++    GST_WARNING_OBJECT (thiz, "unsupport handle flow status: %d", thiz->downstream_flow_ret);
+   }
+-  thiz->downstream_flow_ret = GST_FLOW_OK;
+ 
+-done:
+-  try_to_release_upstream_buffer(thiz);
++  // try_to_release_upstream_buffer(thiz);
+   return;
+-
+-err_case:
+-{
+-  GST_ERROR_OBJECT (thiz, "other cases err! return %d!", ret);
+-  thiz->downstream_flow_ret = GST_FLOW_ERROR;
+-  goto done;
+-}
+-
+-err_packet:
+-{
+-  GST_ERROR_OBJECT (thiz, "get packet err! return %d!", ret);
+-  thiz->downstream_flow_ret = GST_FLOW_ERROR;
+-  goto done;
+-}
+-
+-finish_work:
+-{
+-  GST_DEBUG_OBJECT (thiz, "Get eos, Finish work and pause task!");
+-  drain_all_upstream_buffer(thiz);
+-  gst_pad_pause_task (GST_VIDEO_ENCODER_SRC_PAD (thiz));
+-  thiz->downstream_flow_ret = GST_FLOW_EOS;
+-  goto done;
+-}
+-
+ }
+ 
+ static MppPixelFormat gst_change_to_mpp_format(GstVideoFormat format)
+@@ -720,6 +764,22 @@ static guint get_stride(guint width, guint align) {
+   return (width + align - 1) & (~(align - 1));
+ }
+ 
++static gboolean
++_gst_caps_has_feature (const GstCaps * caps, const gchar * feature)
++{
++  guint i;
++
++  for (i = 0; i < gst_caps_get_size (caps); i++) {
++    GstCapsFeatures *const features = gst_caps_get_features (caps, i);
++    /* Skip ANY features, we need an exact match for correct evaluation */
++    if (gst_caps_features_is_any (features))
++      continue;
++    if (gst_caps_features_contains (features, feature))
++      return TRUE;
++  }
++
++  return FALSE;
++}
+ static gboolean
+ gst_spacemitenc_init_encoder (GstSpacemitEnc * thiz,
+   GstVideoCodecState * state, GstCaps *caps)
+@@ -762,20 +822,35 @@ gst_spacemitenc_init_encoder (GstSpacemitEnc * thiz,
+   thiz->ctx->stVencPara.nFrameRate = fps_n;
+   thiz->ctx->stVencPara.nStride = get_stride(width, 8);
+ 
++  if (_gst_caps_has_feature (state->caps, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
++    GST_DEBUG_OBJECT (thiz, "upstream element had dmabuf memory caps, is spacemitdec!!");
++  } else {
++    GST_DEBUG_OBJECT (thiz, "upstream element had no dmabuf memory caps");
++    thiz->ctx->stVencPara.eFrameBufferType = MPP_FRAME_BUFFERTYPE_NORMAL_EXTERNAL;
++  }
++
+   ret = VENC_Init(thiz->ctx);
+   if (ret)
+-    goto init_err;
++    goto err_exit;
+ 
+   VENC_SetParam(thiz->ctx, &(thiz->ctx->stVencPara));
+ 
++  if (thiz->eCodingType == CODING_VP8 || thiz->eCodingType == CODING_VP9) {
++    thiz->mpppacket_pner = PACKET_Create ();
++    if (!thiz->mpppacket_pner)
++      goto err_exit;
++    else
++      PACKET_Alloc(thiz->mpppacket_pner, PACKET_SIZE);
++  }
++
+   GST_DEBUG_OBJECT (thiz, "finish init encoder (%d %d %d) %s",
+     stride0, stride1, stride2, gst_video_format_to_string (fmt));
+ 
+   return TRUE;
+-  
+-init_err:
++
++err_exit:
+   VENC_DestoryChannel(thiz->ctx);
+-  GST_ERROR_OBJECT (thiz, "init encoder error, please check !");
++  GST_ERROR_OBJECT (thiz, "VENC_Init/PACKET_Create error, please check !");
+   return FALSE;
+ }
+ 
+@@ -784,7 +859,8 @@ gst_spacemitenc_set_format (GstVideoEncoder * encoder,
+     GstVideoCodecState * state)
+ {
+   GstSpacemitEnc *thiz = GST_SPACEMITENC (encoder);
+-  GstCaps *outcaps;
++  GstSpacemitEncClass *klass = GST_SPACEMITENC_GET_CLASS (thiz);
++  GstCaps *outcaps = NULL;
+   GstCaps *caps;
+   GstVideoInfo *vinfo;
+   GstVideoCodecState *output_state;
+@@ -796,7 +872,14 @@ gst_spacemitenc_set_format (GstVideoEncoder * encoder,
+ 
+   thiz->frame_count = 0;
+   thiz->input_state = gst_video_codec_state_ref (state);
+-  outcaps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitenc_src_template));
++
++  if (klass->set_src_caps)
++    outcaps = klass->set_src_caps (thiz);
++
++  if (!outcaps)
++    return FALSE;
++
++  // outcaps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitenc_src_template));
+   GST_DEBUG_OBJECT (thiz, "spacemitenc support outcaps %" GST_PTR_FORMAT, outcaps);
+ 
+   caps = gst_pad_peer_query_caps (encoder->srcpad, outcaps);
+@@ -860,6 +943,33 @@ gst_spacemitenc_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
+       (gst_spacemitenc_parent_class)->propose_allocation (encoder, query);
+ }
+ 
++static void
++gstbuffer_disposed (MppFrame *mppframe)
++{
++  GST_LOG ("Destory mppframe %d", FRAME_GetID(mppframe));
++  FRAME_Destory(mppframe);
++}
++
++MppFrame *get_mppframe_from_vdec_mem (GstSpacemitEnc * thiz, GstBuffer *input_buffer)
++{
++  GstMemory *mem;
++  MppFrame *mppframe = NULL;
++
++  if (input_buffer != NULL) {
++    mem = gst_buffer_peek_memory (input_buffer, 0);
++
++    if (GST_IS_SPACEMIT_DEC_ALLOCATOR (mem->allocator)) {    
++      mppframe = gst_mini_object_get_qdata (GST_MINI_OBJECT (mem),
++          GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK);
++
++      GST_DEBUG_OBJECT (thiz, "mem %p allocator is spacemit (dmabuf), mppframe id:%d, fd: %d, eos: %d",
++        mem, FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0), FRAME_GetEos(mppframe));
++    }
++  }
++
++  return mppframe;
++}
++
+ static gint32 gst_spacemitenc_venc_encode (GstSpacemitEnc * thiz, MppFrame *mppframe)
+ {
+   gint32 ret;
+@@ -874,7 +984,7 @@ static gint32 gst_spacemitenc_venc_encode (GstSpacemitEnc * thiz, MppFrame *mppf
+       if (count >= 2 && count < MAX_POLL_TIME) {
+         g_usleep(500);
+       } else if (count >= MAX_POLL_TIME) {
+-        GST_ERROR_OBJECT (thiz, "try max times: %u, fail return(%d)", MAX_POLL_TIME, ret);
++        GST_ERROR_OBJECT (thiz, "try max times: %u ms, fail return(%d)", MAX_POLL_TIME / 2, ret);
+         ret = MPP_POLL_FAILED;
+         break;
+       }
+@@ -887,24 +997,90 @@ static gint32 gst_spacemitenc_venc_encode (GstSpacemitEnc * thiz, MppFrame *mppf
+   return ret;
+ }
+ 
+-MppFrame *get_mppframe_from_vdec_mem (GstSpacemitEnc * thiz, GstBuffer *input_buffer)
++static GstFlowReturn gst_spacemitenc_encode_one_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
+ {
+-  GstMemory *mem;
++  GstSpacemitEnc *thiz = GST_SPACEMITENC (encoder);
+   MppFrame *mppframe = NULL;
++  GstFlowReturn flow_ret = GST_FLOW_OK;
++  GstVideoFrame video_frame;
++  gint32 ret;
++  gint32 mppframe_id;
+ 
+-  if (input_buffer != NULL) {
+-    mem = gst_buffer_peek_memory (input_buffer, 0);
+-
+-    if (GST_IS_SPACEMIT_DEC_ALLOCATOR (mem->allocator)) {    
+-      mppframe = gst_mini_object_get_qdata (GST_MINI_OBJECT (mem),
+-          GST_SPACEMIT_DEC_DMABUF_MEMORY_QUARK);
++  if (frame) {
++    GST_DEBUG_OBJECT (thiz, "handle frame %p, snb:%u, input buffer pts: %"  GST_TIME_FORMAT ", dts %" GST_TIME_FORMAT,
++        frame, frame->system_frame_number, GST_TIME_ARGS (GST_BUFFER_PTS (frame->input_buffer)),
++        GST_TIME_ARGS (GST_BUFFER_DTS (frame->input_buffer)));
++
++    if (thiz->ctx->stVencPara.eFrameBufferType != MPP_FRAME_BUFFERTYPE_NORMAL_EXTERNAL) {
++      mppframe = get_mppframe_from_vdec_mem (thiz, frame->input_buffer);  //mppframe is from spacemitdec
++      if (!mppframe) {
++        flow_ret = GST_FLOW_ERROR;
++        goto done;
++      }
++    } else {
++      mppframe = FRAME_Create();
++      //FIXME: get VENC_ReturnInputFrame id and set in mppframe id
++      if (thiz->frame_count >= MPP_ENCODER_FRAME_MAX) {
++        ret = try_to_release_upstream_buffer(thiz, &mppframe_id);
++        if (ret == FALSE) {
++          flow_ret = GST_FLOW_ERROR;
++          goto done;
++        }
++      } else {
++        mppframe_id = thiz->frame_count % MPP_ENCODER_FRAME_MAX;
++      }
++      FRAME_SetID(mppframe, mppframe_id);
++      gst_mini_object_weak_ref(GST_MINI_OBJECT(frame->input_buffer),
++                              (GstMiniObjectNotify) gstbuffer_disposed,
++                              mppframe);
++
++      gst_video_frame_map (&video_frame, &thiz->input_state->info, frame->input_buffer, GST_MAP_READ);
++      if (thiz->PixelFormat == PIXEL_FORMAT_I420) {
++        FRAME_SetDataUsedNum(mppframe, 3);
++        FRAME_SetDataPointer(mppframe, 0, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 0));
++        FRAME_SetDataPointer(mppframe, 1, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 1));
++        FRAME_SetDataPointer(mppframe, 2, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 2));
++      } else {
++        FRAME_SetDataUsedNum(mppframe, 2);
++        FRAME_SetDataPointer(mppframe, 0, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 0));
++        FRAME_SetDataPointer(mppframe, 1, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 1));
++  #if 0
++        //SF_OMX_BUF_INFO *pBufInfo = pOMXBuffer->pOutputPortPrivate;
++        //LOG(SF_LOG_INFO, "%p %d %p\r\n", pOMXBuffer->pBuffer, pOMXBuffer->nFilledLen, pBufInfo->remap_vaddr);
++        GST_DEBUG_OBJECT (thiz, "debug save video_frame in file: %s, %d, (%d, %d, %d)",
++          gst_video_format_to_string(GST_VIDEO_FRAME_FORMAT(&video_frame)),
++          GST_VIDEO_FRAME_N_PLANES(&video_frame), GST_VIDEO_FRAME_SIZE(&video_frame),
++          GST_VIDEO_FRAME_WIDTH(&video_frame), GST_VIDEO_FRAME_HEIGHT(&video_frame));
++        fwrite(GST_VIDEO_FRAME_COMP_DATA (&video_frame, 0), 1, 1280*720, fbbb);
++        fwrite(GST_VIDEO_FRAME_COMP_DATA (&video_frame, 1), 1, 1280*720/2, fbbb);
++
++  #endif
++      }
++      gst_video_frame_unmap (&video_frame);
+ 
+-      GST_DEBUG_OBJECT (thiz, "mem %p allocator is spacemit (dmabuf), mppframe id:%d, fd: %d, eos: %d",
+-        mem, FRAME_GetID(mppframe), FRAME_GetFD(mppframe, 0), FRAME_GetEos(mppframe));
+     }
++
++    setup_input_buffer_and_mppframe_hash (thiz, FRAME_GetID(mppframe), frame->input_buffer);
++
++    FRAME_SetEos(mppframe, FRAME_NO_EOS);
++    FRAME_SetPts(mppframe, GST_BUFFER_PTS (frame->input_buffer));
++    thiz->frame_count++;
++  } else {
++    GST_DEBUG_OBJECT (thiz, "null frame enc, need eos");
++    FRAME_SetEos(thiz->mppframe, FRAME_EOS_WITHOUT_DATA);
++    mppframe = thiz->mppframe;
+   }
+ 
+-  return mppframe;
++  GST_LOG_OBJECT (thiz, "start to try VENC_SendInputFrame, mppframe_id:%d", mppframe_id);
++  ret = gst_spacemitenc_venc_encode (thiz, mppframe);
++  if (ret != MPP_OK) {
++    GST_ELEMENT_ERROR (thiz, STREAM, ENCODE, ("Could not encode frame"), ("VENC_SendInputFrame return %d", ret));
++    flow_ret = GST_FLOW_ERROR;
++    goto done;
++  }
++
++done:
++  return flow_ret;
+ }
+ 
+ static GstFlowReturn
+@@ -924,7 +1100,7 @@ gst_spacemitenc_handle_frame (GstVideoEncoder * encoder,
+   GST_DEBUG_OBJECT (thiz, "start handle frame");
+ 
+   if (thiz->downstream_flow_ret != GST_FLOW_OK)
+-    goto downstream_err;
++    goto downstream;
+ 
+   if (!gst_pad_has_current_caps (GST_VIDEO_ENCODER_SRC_PAD (thiz))) {
+     GST_DEBUG_OBJECT (thiz, "start encoder negotiate");
+@@ -937,58 +1113,13 @@ gst_spacemitenc_handle_frame (GstVideoEncoder * encoder,
+     }
+   }
+ 
+-  if (frame) {
+-    thiz->frame_count++;
+-    FRAME_SetEos(thiz->mppframe, FRAME_NO_EOS);
+-
+-    gst_video_frame_map (&video_frame, &thiz->input_state->info, frame->input_buffer, GST_MAP_READ);
+-    if (thiz->PixelFormat == PIXEL_FORMAT_I420) {
+-      FRAME_SetDataUsedNum(thiz->mppframe, 3);
+-      FRAME_SetDataPointer(thiz->mppframe, 0, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 0));
+-      FRAME_SetDataPointer(thiz->mppframe, 1, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 1));
+-      FRAME_SetDataPointer(thiz->mppframe, 2, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 2));
+-    } else {
+-      GST_DEBUG_OBJECT (thiz, "debug save video_frame in file: %s, %d, (%d, %d, %d)",
+-        gst_video_format_to_string(GST_VIDEO_FRAME_FORMAT(&video_frame)),
+-        GST_VIDEO_FRAME_N_PLANES(&video_frame), GST_VIDEO_FRAME_SIZE(&video_frame),
+-        GST_VIDEO_FRAME_WIDTH(&video_frame), GST_VIDEO_FRAME_HEIGHT(&video_frame));
+-
+-      FRAME_SetDataUsedNum(thiz->mppframe, 2);
+-      FRAME_SetDataPointer(thiz->mppframe, 0, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 0));
+-      FRAME_SetDataPointer(thiz->mppframe, 1, GST_VIDEO_FRAME_PLANE_DATA (&video_frame, 1));
+-#if 0
+-      //SF_OMX_BUF_INFO *pBufInfo = pOMXBuffer->pOutputPortPrivate;
+-      //LOG(SF_LOG_INFO, "%p %d %p\r\n", pOMXBuffer->pBuffer, pOMXBuffer->nFilledLen, pBufInfo->remap_vaddr);
+-
+-      fwrite(GST_VIDEO_FRAME_COMP_DATA (&video_frame, 0), 1, 1280*720, fbbb);
+-      fwrite(GST_VIDEO_FRAME_COMP_DATA (&video_frame, 1), 1, 1280*720/2, fbbb);
+-
+-#endif
+-    }
+-    gst_video_frame_unmap (&video_frame);
+-    mppframe = get_mppframe_from_vdec_mem (thiz, frame->input_buffer);
+-    if (!mppframe) {
+-      flow_ret = GST_FLOW_ERROR;
+-      goto done;
+-    }
+-
+-    setup_gstbuffer_and_mppframe_hash(thiz, FRAME_GetID(mppframe), frame->input_buffer);
+-    FRAME_SetPts(mppframe, GST_BUFFER_PTS (frame->input_buffer));
+-  } else {
+-    GST_DEBUG_OBJECT (thiz, "null frame enc, need eos");
+-    FRAME_SetEos(thiz->mppframe, FRAME_EOS_WITHOUT_DATA);
+-    mppframe = thiz->mppframe;
+-  }
+-
+   GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+-  ret = gst_spacemitenc_venc_encode (thiz, mppframe);
+-  // ret = VENC_Encode(thiz->ctx, FRAME_GetBaseData(thiz->mppframe));
++  flow_ret = gst_spacemitenc_encode_one_frame (encoder, frame);
+   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
+-  if (ret != MPP_OK) {
+-    GST_ELEMENT_ERROR (thiz, STREAM, ENCODE, ("Could not encode frame"), ("spacemitenc return %d", ret));
+-    flow_ret = GST_FLOW_ERROR;
++  if (flow_ret != GST_FLOW_OK)
+     goto done;
+-  }
++
++  thiz->pending_frames++;
+ 
+   flow_ret = thiz->downstream_flow_ret;
+ 
+@@ -1002,12 +1133,12 @@ gst_spacemitenc_handle_frame (GstVideoEncoder * encoder,
+   }
+ 
+ done:
+-  try_to_release_upstream_buffer(thiz);
++  // try_to_release_upstream_buffer(thiz);
+   return flow_ret;
+ 
+-downstream_err:
++downstream:
+ {
+-  GST_ERROR_OBJECT (thiz, "Downstream returned %s", gst_flow_get_name (thiz->downstream_flow_ret));
++  GST_WARNING_OBJECT (thiz, "Downstream returned %s", gst_flow_get_name (thiz->downstream_flow_ret));
+   flow_ret = thiz->downstream_flow_ret;
+   goto done;
+ }
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitenc.h b/ext/spacemit/spacemitcodec/gstspacemitenc.h
+index ae9be5b..881f6f2 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitenc.h
++++ b/ext/spacemit/spacemitcodec/gstspacemitenc.h
+@@ -9,10 +9,6 @@
+ #include <gst/video/video.h>
+ #include <gst/video/gstvideoencoder.h>
+ #include "gstspacemitallocator.h"
+-//#include <wels/codec_api.h>
+-//#include <wels/codec_app_def.h>
+-//#include <wels/codec_def.h>
+-//#include <wels/codec_ver.h>
+ 
+ #include <venc.h>
+ 
+@@ -31,9 +27,22 @@ typedef enum
+   GST_SPACEMIT_SLICE_MODE_AUTO = 5       /* former SM_AUTO_SLICE */
+ } GstSpacemitEncSliceMode;
+ 
++typedef enum {
++  GST_SPACEMIT_PRESET_DEFAULT,
++  GST_SPACEMIT_PRESET_HP,
++  GST_SPACEMIT_PRESET_HQ,
++/* FIXME: problematic GST_NV_PRESET_BD, */
++  GST_SPACEMIT_PRESET_LOW_LATENCY_DEFAULT,
++  GST_SPACEMIT_PRESET_LOW_LATENCY_HQ,
++  GST_SPACEMIT_PRESET_LOW_LATENCY_HP,
++  GST_SPACEMIT_PRESET_LOSSLESS_DEFAULT,
++  GST_SPACEMIT_PRESET_LOSSLESS_HP,
++} GstSpacemitPreset;
++
+ #define GST_TYPE_SPACEMITENC          (gst_spacemitenc_get_type())
+ #define GST_SPACEMITENC(obj)          (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITENC,GstSpacemitEnc))
+ #define GST_SPACEMITENC_CLASS(klass)  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITENC,GstSpacemitEncClass))
++#define GST_SPACEMITENC_GET_CLASS(obj) (G_TYPE_INSTANCE_GET_CLASS((obj),GST_TYPE_SPACEMITENC,GstSpacemitEncClass))
+ #define GST_IS_SPACEMITENC(obj)       (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITENC))
+ #define GST_IS_SPACEMITENC_CLASS(obj) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITENC))
+ 
+@@ -47,6 +56,8 @@ struct _GstSpacemitEnc
+ {
+   GstVideoEncoder base_spacemitenc;
+ 
++  /* properties */
++  GstSpacemitPreset     preset_enum;
+   /*< private >*/
+   //ISVCEncoder *encoder;
+ //  EUsageType usage_type;
+@@ -90,14 +101,27 @@ struct _GstSpacemitEnc
+   MppVencCtx *ctx;
+ 	MppVencPara *para;
+ 	MppPacket *mpppacket;
++	MppPacket *mpppacket_pner;
+ 	MppFrame *mppframe;
+ };
+ 
+ struct _GstSpacemitEncClass
+ {
+     GstVideoEncoderClass base_spacemitenc_class;
++    GstCaps *(*set_src_caps) (GstSpacemitEnc * encoder);
+ };
+ 
++#ifndef GST_CAPS_FEATURE_MEMORY_DMABUF
++#define GST_CAPS_FEATURE_MEMORY_DMABUF "memory:DMABuf"
++#endif
++
++#define SPM_ENC_IN_FORMATS "I420, NV21, NV12"
++#define SPM_ENC_FORMATS SPM_ENC_IN_FORMATS
++#define SPM_ENC_CAPS_MAKE(fmts) \
++    GST_VIDEO_CAPS_MAKE (fmts) ";" \
++    GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_MEMORY_DMABUF, fmts)
++
++
+ GType gst_spacemitenc_get_type(void);
+ gboolean
+ gst_spacemitenc_register (GstPlugin * plugin, guint rank);
+diff --git a/ext/spacemit/spacemitcodec/gstspacemith264enc.c b/ext/spacemit/spacemitcodec/gstspacemith264enc.c
+new file mode 100755
+index 0000000..712f0b3
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemith264enc.c
+@@ -0,0 +1,141 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemith264enc
++ * @title: spacemith264enc
++ * @short_description: Spacemit H264 encoder
++ *
++ * H264 video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemith264enc ! h264parse ! filesink location=output.h264
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemith264enc.h"
++
++#include <gst/base/base.h>
++#include <gst/pbutils/pbutils.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemith264enc_debug);
++#define GST_CAT_DEFAULT gst_spacemith264enc_debug
++
++static GstStaticPadTemplate gst_spacemith264enc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemith264enc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "video/x-h264,"
++    "stream-format = (string) byte-stream,"
++    "alignment = (string)au,"
++    "width=(int) [1,MAX], " "height=(int) [1,MAX]"
++  ));
++
++#define gst_spacemith264enc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitH264Enc, gst_spacemith264enc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemith264enc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemith264enc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemith264enc_dispose (GObject * object)
++{
++  GstSpacemitH264Enc *thiz = GST_SPACEMITH264ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemith264enc_finalize (GObject * object)
++{
++  GstSpacemitH264Enc *thiz = GST_SPACEMITH264ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemith264enc_class_init (GstSpacemitH264EncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemith264enc", 0,
++      "Spacemit H264 encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemith264enc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemith264enc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemith264enc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit H264 Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemith264enc_init (GstSpacemitH264Enc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemith264enc.h b/ext/spacemit/spacemitcodec/gstspacemith264enc.h
+new file mode 100755
+index 0000000..7bc0d07
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemith264enc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITH264ENC_H__
++#define __GST_SPACEMITH264ENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITH264ENC \
++  (gst_spacemith264enc_get_type())
++#define GST_SPACEMITH264ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITH264ENC,GstSpacemitH264Enc))
++#define GST_SPACEMITH264ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITH264ENC,GstSpacemitH264EncClass))
++#define GST_IS_SPACEMITH264ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITH264ENC))
++#define GST_IS_SPACEMITH264ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITH264ENC))
++
++typedef struct _GstSpacemitH264Enc GstSpacemitH264Enc;
++typedef struct _GstSpacemitH264EncClass GstSpacemitH264EncClass;
++
++struct _GstSpacemitH264Enc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitH264EncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemith264enc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITH264ENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemith265enc.c b/ext/spacemit/spacemitcodec/gstspacemith265enc.c
+new file mode 100755
+index 0000000..7cfe027
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemith265enc.c
+@@ -0,0 +1,140 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemith265enc
++ * @title: spacemith265enc
++ * @short_description: Spacemit H265 encoder
++ *
++ * H265 video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemith265enc ! h265parse ! filesink location=output.h265
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemith265enc.h"
++
++#include <gst/base/base.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemith265enc_debug);
++#define GST_CAT_DEFAULT gst_spacemith265enc_debug
++
++static GstStaticPadTemplate gst_spacemith265enc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemith265enc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "video/x-h265,"
++    "stream-format = (string) byte-stream,"
++    "alignment = (string)au,"
++    "width=(int) [1,MAX], " "height=(int) [1,MAX]"
++  ));
++
++#define gst_spacemith265enc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitH265Enc, gst_spacemith265enc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemith265enc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemith265enc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemith265enc_dispose (GObject * object)
++{
++  GstSpacemitH265Enc *thiz = GST_SPACEMITH265ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemith265enc_finalize (GObject * object)
++{
++  GstSpacemitH265Enc *thiz = GST_SPACEMITH265ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemith265enc_class_init (GstSpacemitH265EncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemith265enc", 0,
++      "Spacemit H265 encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemith265enc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemith265enc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemith265enc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit H265 Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemith265enc_init (GstSpacemitH265Enc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemith265enc.h b/ext/spacemit/spacemitcodec/gstspacemith265enc.h
+new file mode 100755
+index 0000000..812cd67
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemith265enc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITH265ENC_H__
++#define __GST_SPACEMITH265ENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITH265ENC \
++  (gst_spacemith265enc_get_type())
++#define GST_SPACEMITH265ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITH265ENC,GstSpacemitH265Enc))
++#define GST_SPACEMITH265ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITH265ENC,GstSpacemitH265EncClass))
++#define GST_IS_SPACEMITH265ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITH265ENC))
++#define GST_IS_SPACEMITH265ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITH265ENC))
++
++typedef struct _GstSpacemitH265Enc GstSpacemitH265Enc;
++typedef struct _GstSpacemitH265EncClass GstSpacemitH265EncClass;
++
++struct _GstSpacemitH265Enc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitH265EncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemith265enc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITH265ENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.c b/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.c
+new file mode 100755
+index 0000000..d77bf9e
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.c
+@@ -0,0 +1,138 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemitmjpegenc
++ * @title: spacemitmjpegenc
++ * @short_description: Spacemit Mjpeg encoder
++ *
++ * Mjpeg video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemitmjpegenc ! mjpegparse ! filesink location=output.mjpeg
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemitmjpegenc.h"
++
++#include <gst/base/base.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemitmjpegenc_debug);
++#define GST_CAT_DEFAULT gst_spacemitmjpegenc_debug
++
++static GstStaticPadTemplate gst_spacemitmjpegenc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemitmjpegenc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "image/jpeg,"
++    ";"
++  ));
++
++#define gst_spacemitmjpegenc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitMjpegEnc, gst_spacemitmjpegenc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemitmjpegenc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitmjpegenc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemitmjpegenc_dispose (GObject * object)
++{
++  GstSpacemitMjpegEnc *thiz = GST_SPACEMITMJPEGENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemitmjpegenc_finalize (GObject * object)
++{
++  GstSpacemitMjpegEnc *thiz = GST_SPACEMITMJPEGENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemitmjpegenc_class_init (GstSpacemitMjpegEncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitmjpegenc", 0,
++      "Spacemit Mjpeg encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemitmjpegenc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitmjpegenc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitmjpegenc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit Mjpeg Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemitmjpegenc_init (GstSpacemitMjpegEnc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.h b/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.h
+new file mode 100755
+index 0000000..8797f62
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitmjpegenc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITMJPEGENC_H__
++#define __GST_SPACEMITMJPEGENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITMJPEGENC \
++  (gst_spacemitmjpegenc_get_type())
++#define GST_SPACEMITMJPEGENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITMJPEGENC,GstSpacemitMjpegEnc))
++#define GST_SPACEMITMJPEGENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITMJPEGENC,GstSpacemitMjpegEncClass))
++#define GST_IS_SPACEMITMJPEGENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITMJPEGENC))
++#define GST_IS_SPACEMITMJPEGENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITMJPEGENC))
++
++typedef struct _GstSpacemitMjpegEnc GstSpacemitMjpegEnc;
++typedef struct _GstSpacemitMjpegEncClass GstSpacemitMjpegEncClass;
++
++struct _GstSpacemitMjpegEnc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitMjpegEncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemitmjpegenc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITMJPEGENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitmpegenc.c b/ext/spacemit/spacemitcodec/gstspacemitmpegenc.c
+new file mode 100755
+index 0000000..f966ff6
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitmpegenc.c
+@@ -0,0 +1,141 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemitmpegenc
++ * @title: spacemitmpegenc
++ * @short_description: Spacemit Mpeg encoder
++ *
++ * Mpeg video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemitmpegenc ! mpegparse ! filesink location=output.mpeg
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemitmpegenc.h"
++
++#include <gst/base/base.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemitmpegenc_debug);
++#define GST_CAT_DEFAULT gst_spacemitmpegenc_debug
++
++static GstStaticPadTemplate gst_spacemitmpegenc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemitmpegenc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "video/mpeg,"
++    "mpegversion = (int) { 1, 2, 4 },"
++    "parsed = (boolean) true,"
++    "systemstream = (boolean) false"
++    ";"
++  ));
++
++#define gst_spacemitmpegenc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitMpegEnc, gst_spacemitmpegenc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemitmpegenc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitmpegenc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemitmpegenc_dispose (GObject * object)
++{
++  GstSpacemitMpegEnc *thiz = GST_SPACEMITMPEGENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemitmpegenc_finalize (GObject * object)
++{
++  GstSpacemitMpegEnc *thiz = GST_SPACEMITMPEGENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemitmpegenc_class_init (GstSpacemitMpegEncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitmpegenc", 0,
++      "Spacemit Mpeg encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemitmpegenc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitmpegenc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitmpegenc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit Mpeg Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemitmpegenc_init (GstSpacemitMpegEnc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitmpegenc.h b/ext/spacemit/spacemitcodec/gstspacemitmpegenc.h
+new file mode 100755
+index 0000000..2a5c4c0
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitmpegenc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITMPEGENC_H__
++#define __GST_SPACEMITMPEGENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITMPEGENC \
++  (gst_spacemitmpegenc_get_type())
++#define GST_SPACEMITMPEGENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITMPEGENC,GstSpacemitMpegEnc))
++#define GST_SPACEMITMPEGENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITMPEGENC,GstSpacemitMpegEncClass))
++#define GST_IS_SPACEMITMPEGENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITMPEGENC))
++#define GST_IS_SPACEMITMPEGENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITMPEGENC))
++
++typedef struct _GstSpacemitMpegEnc GstSpacemitMpegEnc;
++typedef struct _GstSpacemitMpegEncClass GstSpacemitMpegEncClass;
++
++struct _GstSpacemitMpegEnc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitMpegEncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemitmpegenc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITMPEGENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitplugin.c b/ext/spacemit/spacemitcodec/gstspacemitplugin.c
+index be75339..edbe0f7 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitplugin.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitplugin.c
+@@ -11,13 +11,30 @@
+ 
+ #include "gstspacemitdec.h"
+ #include "gstspacemitenc.h"
++#include "gstspacemith264enc.h"
++#include "gstspacemith265enc.h"
++#include "gstspacemitvp8enc.h"
++#include "gstspacemitvp9enc.h"
++#include "gstspacemitmjpegenc.h"
++#include "gstspacemitmpegenc.h"
+ 
+ static gboolean plugin_init(GstPlugin *plugin)
+ {
+   gboolean ret = FALSE;
+ 
+   ret |= gst_spacemitdec_register (plugin, GST_RANK_PRIMARY + 1);
+-  ret |= gst_spacemitenc_register (plugin, GST_RANK_PRIMARY - 1);
++  ret |= gst_element_register (plugin, "spacemith264enc", GST_RANK_PRIMARY + 1,
++      GST_TYPE_SPACEMITH264ENC);
++  ret |= gst_element_register (plugin, "spacemith265enc", GST_RANK_PRIMARY + 1,
++      GST_TYPE_SPACEMITH265ENC);
++  ret |= gst_element_register (plugin, "spacemitvp8enc", GST_RANK_PRIMARY + 1,
++      GST_TYPE_SPACEMITVP8ENC);
++  ret |= gst_element_register (plugin, "spacemitvp9enc", GST_RANK_PRIMARY + 1,
++      GST_TYPE_SPACEMITVP9ENC);
++  ret |= gst_element_register (plugin, "spacemitmjpegenc", GST_RANK_PRIMARY - 1,
++      GST_TYPE_SPACEMITMJPEGENC);
++  ret |= gst_element_register (plugin, "spacemitmpegenc", GST_RANK_PRIMARY + 1,
++      GST_TYPE_SPACEMITMPEGENC);
+ 
+   return ret;
+ }
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitvp8enc.c b/ext/spacemit/spacemitcodec/gstspacemitvp8enc.c
+new file mode 100755
+index 0000000..dd5b7b7
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitvp8enc.c
+@@ -0,0 +1,139 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemitvp8enc
++ * @title: spacemitvp8enc
++ * @short_description: Spacemit Vp8 encoder
++ *
++ * Vp8 video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemitvp8enc ! vp8parse ! filesink location=output.vp8
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemitvp8enc.h"
++
++#include <gst/base/base.h>
++#include <gst/pbutils/pbutils.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemitvp8enc_debug);
++#define GST_CAT_DEFAULT gst_spacemitvp8enc_debug
++
++static GstStaticPadTemplate gst_spacemitvp8enc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemitvp8enc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "video/x-vp8"
++    ";"
++  ));
++
++#define gst_spacemitvp8enc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitVp8Enc, gst_spacemitvp8enc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemitvp8enc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitvp8enc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemitvp8enc_dispose (GObject * object)
++{
++  GstSpacemitVp8Enc *thiz = GST_SPACEMITVP8ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemitvp8enc_finalize (GObject * object)
++{
++  GstSpacemitVp8Enc *thiz = GST_SPACEMITVP8ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemitvp8enc_class_init (GstSpacemitVp8EncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitvp8enc", 0,
++      "Spacemit Vp8 encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemitvp8enc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitvp8enc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitvp8enc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit Vp8 Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemitvp8enc_init (GstSpacemitVp8Enc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitvp8enc.h b/ext/spacemit/spacemitcodec/gstspacemitvp8enc.h
+new file mode 100755
+index 0000000..810db26
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitvp8enc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITVP8ENC_H__
++#define __GST_SPACEMITVP8ENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITVP8ENC \
++  (gst_spacemitvp8enc_get_type())
++#define GST_SPACEMITVP8ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITVP8ENC,GstSpacemitVp8Enc))
++#define GST_SPACEMITVP8ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITVP8ENC,GstSpacemitVp8EncClass))
++#define GST_IS_SPACEMITVP8ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITVP8ENC))
++#define GST_IS_SPACEMITVP8ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITVP8ENC))
++
++typedef struct _GstSpacemitVp8Enc GstSpacemitVp8Enc;
++typedef struct _GstSpacemitVp8EncClass GstSpacemitVp8EncClass;
++
++struct _GstSpacemitVp8Enc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitVp8EncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemitvp8enc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITVP8ENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitvp9enc.c b/ext/spacemit/spacemitcodec/gstspacemitvp9enc.c
+new file mode 100755
+index 0000000..b61155b
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitvp9enc.c
+@@ -0,0 +1,138 @@
++/* GStreamer Spacemit encode plugin
++ * Copyright (c) 2024, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * SECTION: element-spacemitvp9enc
++ * @title: spacemitvp9enc
++ * @short_description: Spacemit Vp9 encoder
++ *
++ * Vp9 video encoder based on Spacemit
++ *
++ * ## Example launch line
++ * ```
++ * gst-launch-1.0 videotestsrc num-buffers=90 ! spacemitvp9enc ! vp9parse ! filesink location=output.vp9
++ * ```
++ *
++ * Since: 1.12
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include <config.h>
++#endif
++
++#include "gstspacemitvp9enc.h"
++
++#include <gst/base/base.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_spacemitvp9enc_debug);
++#define GST_CAT_DEFAULT gst_spacemitvp9enc_debug
++
++static GstStaticPadTemplate gst_spacemitvp9enc_sink_template =
++GST_STATIC_PAD_TEMPLATE ("sink",
++  GST_PAD_SINK,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    SPM_ENC_CAPS_MAKE ("{" SPM_ENC_FORMATS "}") ";"
++  ));
++
++static GstStaticPadTemplate gst_spacemitvp9enc_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++  GST_PAD_SRC,
++  GST_PAD_ALWAYS,
++  GST_STATIC_CAPS
++  (
++    "video/x-vp9"
++    ";"
++  ));
++
++#define gst_spacemitvp9enc_parent_class parent_class
++G_DEFINE_TYPE (GstSpacemitVp9Enc, gst_spacemitvp9enc, GST_TYPE_SPACEMITENC);
++
++static GstCaps *
++gst_spacemitvp9enc_set_src_caps (GstSpacemitEnc * encoder)
++{
++  GstCaps *caps;
++
++  caps = gst_caps_copy (gst_static_pad_template_get_caps(&gst_spacemitvp9enc_src_template));
++
++  return caps;
++}
++
++static void
++gst_spacemitvp9enc_dispose (GObject * object)
++{
++  GstSpacemitVp9Enc *thiz = GST_SPACEMITVP9ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->dispose (object);
++}
++
++static void
++gst_spacemitvp9enc_finalize (GObject * object)
++{
++  GstSpacemitVp9Enc *thiz = GST_SPACEMITVP9ENC (object);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_spacemitvp9enc_class_init (GstSpacemitVp9EncClass * klass)
++{
++  GstElementClass *element_class;
++  GstSpacemitEncClass *encoder_class;
++
++  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "spacemitvp9enc", 0,
++      "Spacemit Vp9 encoder");
++
++  element_class = GST_ELEMENT_CLASS (klass);
++  encoder_class = GST_SPACEMITENC_CLASS (klass);
++
++  encoder_class->set_src_caps = gst_spacemitvp9enc_set_src_caps;
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitvp9enc_sink_template));
++
++  gst_element_class_add_pad_template (element_class,
++      gst_static_pad_template_get (&gst_spacemitvp9enc_src_template));
++
++  gst_element_class_set_static_metadata (element_class,
++      "Spacemit Vp9 Encoder", "Codec/Encoder/Video",
++      "Encode video streams via Spacemit Mpp",
++      "ZRong <zhirong.li@spacemit.com>");
++}
++
++static void
++gst_spacemitvp9enc_init (GstSpacemitVp9Enc * thiz)
++{
++
++}
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitvp9enc.h b/ext/spacemit/spacemitcodec/gstspacemitvp9enc.h
+new file mode 100755
+index 0000000..d0cc5c9
+--- /dev/null
++++ b/ext/spacemit/spacemitcodec/gstspacemitvp9enc.h
+@@ -0,0 +1,67 @@
++/* GStreamer SPACEMIT plugin
++ * Copyright (c) 2016, Oblong Industries, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * 3. Neither the name of the copyright holder nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GST_SPACEMITVP9ENC_H__
++#define __GST_SPACEMITVP9ENC_H__
++
++#include "gstspacemitenc.h"
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_SPACEMITVP9ENC \
++  (gst_spacemitvp9enc_get_type())
++#define GST_SPACEMITVP9ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_SPACEMITVP9ENC,GstSpacemitVp9Enc))
++#define GST_SPACEMITVP9ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_SPACEMITVP9ENC,GstSpacemitVp9EncClass))
++#define GST_IS_SPACEMITVP9ENC(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_SPACEMITVP9ENC))
++#define GST_IS_SPACEMITVP9ENC_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_SPACEMITVP9ENC))
++
++typedef struct _GstSpacemitVp9Enc GstSpacemitVp9Enc;
++typedef struct _GstSpacemitVp9EncClass GstSpacemitVp9EncClass;
++
++struct _GstSpacemitVp9Enc
++{
++  GstSpacemitEnc base;
++};
++
++struct _GstSpacemitVp9EncClass
++{
++  GstSpacemitEncClass parent_class;
++};
++
++GType gst_spacemitvp9enc_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_SPACEMITVP9ENC_H__ */
+diff --git a/ext/spacemit/spacemitcodec/meson.build b/ext/spacemit/spacemitcodec/meson.build
+index 5495051..27180b2 100755
+--- a/ext/spacemit/spacemitcodec/meson.build
++++ b/ext/spacemit/spacemitcodec/meson.build
+@@ -1,6 +1,12 @@
+ spacemitcodec_sources = [
+   'gstspacemitallocator.c',
+   'gstspacemitenc.c',
++  'gstspacemith264enc.c',
++  'gstspacemith265enc.c',
++  'gstspacemitvp8enc.c',
++  'gstspacemitvp9enc.c',
++  'gstspacemitmjpegenc.c',
++  'gstspacemitmpegenc.c',
+   'gstspacemitdec.c',
+   'gstspacemitplugin.c',
+ ]
+@@ -18,4 +24,9 @@ if spacemitmpp_dep.found()
+ 		install_dir : plugins_install_dir,
+ 	)
+ 	plugins += [gstspacemitcodec]
++  install_data('GstSpacemitVp8Enc.prs', install_dir: presetdir)
++
++  env = environment()
++  env.prepend('GST_PRESET_PATH', meson.current_source_dir())
++  meson.add_devenv(env)
+ endif
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.c b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+index 7ba0cca..cb62f79 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.c
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+@@ -370,7 +370,7 @@ gst_spacemitsrc_set_property (GObject * object, guint property_id,
+       src->height = g_value_get_int (value);
+       break;
+     case PROP_CLOSE_DMABUF:
+-      src->use_dmabuf = FALSE;
++      src->use_dmabuf = g_value_get_boolean (value);
+       break;
+     case PROP_BINNING:
+       src->binning = g_value_get_int (value);
