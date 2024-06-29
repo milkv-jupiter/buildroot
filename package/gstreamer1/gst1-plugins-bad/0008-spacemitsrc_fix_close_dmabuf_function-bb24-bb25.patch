@@ -1,0 +1,128 @@
+diff --git a/ext/spacemit/spacemitcodec/gstspacemitdec.c b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+index ef7695f..788200d 100755
+--- a/ext/spacemit/spacemitcodec/gstspacemitdec.c
++++ b/ext/spacemit/spacemitcodec/gstspacemitdec.c
+@@ -91,6 +91,8 @@ GST_STATIC_PAD_TEMPLATE ("sink",
+     "video/x-vp8"
+     ";"
+     "video/x-vp9"
++    ";"
++    "video/x-divx, divxversion=(int) { 4, 5 }"
+   ));
+ 
+ static GstStaticPadTemplate gst_spacemitdec_src_template =
+@@ -437,6 +439,10 @@ gst_change_mpp_ecoding_type (GstStructure * s)
+       }
+   }
+ 
++  if (gst_structure_has_name (s, "video/x-divx")) {
++    return CODING_MPEG4;
++  }
++
+   if (gst_structure_has_name (s, "image/jpeg"))
+     return CODING_MJPEG;
+ 
+@@ -788,6 +794,7 @@ static gint32 gst_spacemitdec_request_frame (GstSpacemitDec *thiz)
+     ret = GST_FLOW_EOS;
+   } else if (ret == MPP_POLL_FAILED) {
+     GST_ERROR_OBJECT (thiz, "try max times: %u ms, fail return(%d)", MAX_POLL_TIME / 2, ret);
++    GST_ELEMENT_ERROR (thiz, STREAM, DECODE, ("Could not request frame"), ("VDEC_RequestOutputFrame return %d", ret));
+     FRAME_Destory(thiz->mppframe);
+     ret = GST_FLOW_ERROR;
+   } else if  (ret == MPP_CODER_NULL_DATA) {
+@@ -920,8 +927,14 @@ done:
+     }
+     GST_INFO_OBJECT (thiz, "flushing spacemit decoder");
+   } else if (thiz->downstream_flow_ret == GST_FLOW_EOS) {  //EOS flow
+-
+     thiz->status = DECODER_EOS;
++    // while (1) {
++    //   frame = gst_video_decoder_get_oldest_frame (decoder);
++    //   if (frame == NULL)
++    //     break;
++    //   GST_DEBUG_OBJECT (thiz, "release frame %p", frame);
++    //   gst_video_decoder_release_frame (decoder, frame);
++    // }
+     GST_INFO_OBJECT (thiz, "spacemit decoder got EOS");
+   } else if (thiz->downstream_flow_ret == GST_FLOW_ERROR) {  //ERROR flow
+     GST_ERROR_OBJECT (thiz, "flow status ERROR");
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.c b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+index cb62f79..c3f74bb 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.c
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.c
+@@ -237,7 +237,7 @@ gst_spacemitsrc_reset (GstSpacemitSrc * src)
+   src->width = DEFAULT_PROP_WIDTH;
+   src->height = DEFAULT_PROP_HEIGHT;
+   src->binning = DEFAULT_PROP_BINNING;
+-  src->use_dmabuf = TRUE;
++  src->close_dmabuf = FALSE;
+   src->last_frame_count = 0;
+   src->total_dropped_frames = 0;
+ 
+@@ -370,7 +370,7 @@ gst_spacemitsrc_set_property (GObject * object, guint property_id,
+       src->height = g_value_get_int (value);
+       break;
+     case PROP_CLOSE_DMABUF:
+-      src->use_dmabuf = g_value_get_boolean (value);
++      src->close_dmabuf = g_value_get_boolean (value);
+       break;
+     case PROP_BINNING:
+       src->binning = g_value_get_int (value);
+@@ -429,7 +429,7 @@ gst_spacemitsrc_get_property (GObject * object, guint property_id,
+       g_value_set_int (value, src->height);
+       break;
+     case PROP_CLOSE_DMABUF:
+-      g_value_set_boolean (value, src->use_dmabuf);
++      g_value_set_boolean (value, src->close_dmabuf);
+       break;
+     case PROP_BINNING:
+       g_value_set_int (value, src->binning);
+@@ -587,7 +587,7 @@ gst_spacemitsrc_setup_stream (GstSpacemitSrc * src)
+   src->sensorHandle = sensorHandle;
+   src->sensorInfoId = sensor_info.sensorId;
+ 
+-  GST_DEBUG_OBJECT (src, "sensor stream on (%d)", src->use_dmabuf);
++  GST_DEBUG_OBJECT (src, "sensor stream on (%d)", src->close_dmabuf);
+   {
+     GstStructure *structure;
+     GstCaps *caps;
+@@ -605,7 +605,7 @@ gst_spacemitsrc_setup_stream (GstSpacemitSrc * src)
+     if (src->caps) {
+       gst_caps_unref (src->caps);
+     }
+-    if (src->use_dmabuf) {
++    if (!src->close_dmabuf) {
+       gst_caps_set_features (caps, 0,
+         gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+       GST_INFO_OBJECT (src, "set DMABUF feature to spacemitsrc src cap %" GST_PTR_FORMAT, caps);
+@@ -723,7 +723,7 @@ gst_spacemitsrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * query)
+   guint size, min = 1, max = 0;
+ 
+   GST_DEBUG_OBJECT (src, "decide_allocation be params: %" GST_PTR_FORMAT, query);
+-  if (src->use_dmabuf == 0) {
++  if (src->close_dmabuf) {
+     goto parent;
+   }
+ 
+@@ -800,7 +800,7 @@ gst_spacemitsrc_create (GstPushSrc * psrc, GstBuffer ** buf)
+ 
+   GstBuffer *newbuf;
+ 
+-  if (src->use_dmabuf) {
++  if (!src->close_dmabuf) {
+     GstMemory *mem;
+     newbuf = gst_buffer_new ();
+ 
+diff --git a/ext/spacemit/spacemitsrc/gstspacemitsrc.h b/ext/spacemit/spacemitsrc/gstspacemitsrc.h
+index c2dc011..00410da 100755
+--- a/ext/spacemit/spacemitsrc/gstspacemitsrc.h
++++ b/ext/spacemit/spacemitsrc/gstspacemitsrc.h
+@@ -67,7 +67,7 @@ struct _GstSpacemitSrc
+   gint width;
+   gint height;
+   gint binning;
+-  gboolean use_dmabuf;
++  gboolean close_dmabuf;
+   GMutex mutex;
+   GAsyncQueue *queue;
+   GstClockTime base_time;
