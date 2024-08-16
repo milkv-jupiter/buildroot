@@ -1,0 +1,26 @@
+From c43fa25741f76c4ad73b511b33687c155ed58577 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E2=80=9Clilijun=E2=80=9D?= <“lijun.li@spacemit.com”>
+Date: Tue, 6 Aug 2024 09:52:50 +0800
+Subject: [PATCH] the animation time is limited to 0.5 seconds while vbank is
+ disabled
+
+---
+ libweston/animation.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libweston/animation.c b/libweston/animation.c
+index f11754c..7785050 100644
+--- a/libweston/animation.c
++++ b/libweston/animation.c
+@@ -180,7 +180,7 @@ weston_view_animation_frame(struct weston_animation *base,
+ 
+ 	weston_spring_update(&animation->spring, time);
+ 
+-	if (weston_spring_done(&animation->spring)) {
++	if (weston_spring_done(&animation->spring) || ((base->frame_counter > 30) && (timespec_to_msec(&animation->spring.timestamp) == timespec_to_msec(time)))) {
+ 		weston_view_schedule_repaint(animation->view);
+ 		weston_view_animation_destroy(animation);
+ 		return;
+-- 
+2.34.1
+
